@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from . import config, kmedia, pipeline, store
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s: %(message)s")
 log = logging.getLogger("archive-stt")
 # the markup is public data of public lessons: any site may read it
 PUBLIC = {"Cache-Control": "public, max-age=300"}

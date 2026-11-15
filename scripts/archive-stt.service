@@ -1,0 +1,15 @@
+[Unit]
+Description=archive-stt: lesson markup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=archive-stt
+WorkingDirectory=/home/archive-stt/app
+EnvironmentFile=/home/archive-stt/archive-stt.env
+ExecStart=/home/archive-stt/env/bin/uvicorn app.main:app --host 0.0.0.0 --port ${ARCHIVE_STT_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

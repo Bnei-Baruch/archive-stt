@@ -1,0 +1,106 @@
+name: CI/CD
+
+# CI: every push and pull request runs the tests.
+# CD: only a manual run (Actions -> CI/CD -> Run workflow, any branch) deploys that commit to the ai-tools host,
+# next to ai-trns: code /home/archive-stt/app, venv /home/archive-stt/env, settings /home/archive-stt/archive-stt.env
+# (written here from the repo's secrets and variables), data in ARCHIVE_STT_DATA_DIR, systemd unit archive-stt.
+# The first run sets the host up (user, venv, data dir, unit); every run installs requirements.txt and restarts.
+# SSH goes through a jump host, as for ai-trns -- secrets DEPLOY_HOST, DEPLOY_JUMP_HOST, DEPLOY_KNOWN_HOSTS,
+# DEPLOY_SSH_KEY (the same values as ai-trns's).
+# Settings: secrets ARCHIVE_STT_AI_TRNS_URL, ARCHIVE_STT_AI_TRNS_KEY, ARCHIVE_STT_API_KEYS (name:key,...; empty =
+# anyone may start a run); variables ARCHIVE_STT_DATA_DIR, ARCHIVE_STT_KMEDIA_URL, ARCHIVE_STT_CDN_URL,
+# ARCHIVE_STT_PORT.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - run: python -m pytest -q tests
+
+  deploy:
+    needs: test
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      HOST: deploy
+      HOME_DIR: /home/archive-stt
+      APP: /home/archive-stt/app
+      DATA_DIR: ${{ vars.ARCHIVE_STT_DATA_DIR }}
+      PORT: ${{ vars.ARCHIVE_STT_PORT }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          JUMP_HOST: ${{ secrets.DEPLOY_JUMP_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' \
+            "Host jump" "  HostName $JUMP_HOST" "  User root" "  IdentityFile ~/.ssh/id_deploy" "  IdentitiesOnly yes" \
+            "  LogLevel ERROR" \
+            "Host deploy" "  HostName $DEPLOY_HOST" "  User root" "  IdentityFile ~/.ssh/id_deploy" "  IdentitiesOnly yes" \
+            "  ProxyJump jump" "  LogLevel ERROR" > ~/.ssh/config
+
+      - name: Set up the host (first run only does anything)
+        run: |
+          ssh "$HOST" "set -e
+            id archive-stt >/dev/null 2>&1 || useradd --system --create-home --home-dir $HOME_DIR --shell /usr/sbin/nologin archive-stt
+            mkdir -p $APP $DATA_DIR && chown archive-stt: $DATA_DIR
+            [ -x $HOME_DIR/env/bin/python ] || runuser -u archive-stt -- \$(command -v python3.12 || command -v python3) -m venv $HOME_DIR/env"
+
+      - name: Settings
+        env:
+          AI_TRNS_URL: ${{ secrets.ARCHIVE_STT_AI_TRNS_URL }}
+          AI_TRNS_KEY: ${{ secrets.ARCHIVE_STT_AI_TRNS_KEY }}
+          API_KEYS: ${{ secrets.ARCHIVE_STT_API_KEYS }}
+          KMEDIA_URL: ${{ vars.ARCHIVE_STT_KMEDIA_URL }}
+          CDN_URL: ${{ vars.ARCHIVE_STT_CDN_URL }}
+        run: |
+          # through stdin: the keys are not on any command line
+          printf '%s\n' \
+            "ARCHIVE_STT_AI_TRNS_URL=$AI_TRNS_URL" "ARCHIVE_STT_AI_TRNS_KEY=$AI_TRNS_KEY" "ARCHIVE_STT_API_KEYS=$API_KEYS" \
+            "ARCHIVE_STT_DATA_DIR=$DATA_DIR" "ARCHIVE_STT_KMEDIA_URL=$KMEDIA_URL" "ARCHIVE_STT_CDN_URL=$CDN_URL" \
+            "ARCHIVE_STT_PORT=$PORT" \
+            | ssh "$HOST" "umask 077 && cat > $HOME_DIR/archive-stt.env && chown archive-stt: $HOME_DIR/archive-stt.env"
+
+      - name: Deploy
+        run: |
+          mkdir -p out
+          git archive HEAD | tar -x -C out
+          ts=$(date +%Y%m%d%H%M%S)
+          # a backup of the running code; the last 5 of the deploy's own are kept
+          ssh "$HOST" "cp -a $APP $APP.bak.ci.$ts && ls -d $APP.bak.ci.* | sort | head -n -5 | xargs -r rm -rf"
+          rsync -a --delete --exclude __pycache__ out/ "$HOST:$APP/"
+          ssh "$HOST" "set -e
+            echo '${{ github.sha }} ${{ github.ref_name }}' > $APP/DEPLOYED && chown -R archive-stt: $APP
+            runuser -u archive-stt -- $HOME_DIR/env/bin/pip install -q -r $APP/requirements.txt
+            cp $APP/scripts/archive-stt.service /etc/systemd/system/archive-stt.service
+            systemctl daemon-reload && systemctl enable -q archive-stt && systemctl restart archive-stt"
+
+      - name: Check
+        run: |
+          sleep 5
+          ssh "$HOST" "systemctl is-active archive-stt && curl -sf localhost:$PORT/health"
