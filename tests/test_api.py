@@ -140,6 +140,6 @@ def test_checks(env, monkeypatch):
 
 def test_without_keys_a_run_is_started_only_from_this_host(env):
     _, _ = env
-    remote = TestClient(app, client=("10.66.1.1", 50000))
+    remote = TestClient(app, client=("203.0.113.7", 50000))
     assert remote.post("/markup", params={"uid": "Unit0001"}).status_code == 403
     assert remote.get("/health").status_code == 200
