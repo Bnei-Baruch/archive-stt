@@ -14,7 +14,7 @@
 ## API
 | | | |
 |---|---|---|
-| `POST` | `/markup?uid=&language=he&force=false` | запуск, `202` + состояние. С `ARCHIVE_STT_API_KEYS` нужен `X-API-Key` |
+| `POST` | `/markup?uid=&language=he&force=false` | запуск, `202` + состояние. С `ARCHIVE_STT_API_KEYS` нужен `X-API-Key`, без них — только с самого сервера (`127.0.0.1`) |
 | `GET` | `/markup/{uid}` | документ разметки, публично (CORS `*`); 404, пока нет готового запуска |
 | `GET` | `/markup/{uid}/status` | последний запуск: `pending` (`stage`: `words` → `speakers`) → `ready` / `failed` |
 | `GET` | `/health` | |

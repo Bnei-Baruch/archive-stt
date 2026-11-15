@@ -1,6 +1,6 @@
 """archive-stt: lesson markup (chapters and the transcript's paragraphs on the lesson's time line).
 
-    POST /markup?uid=<kmedia unit>&language=he&force=false   start a run -> 202 + its state   (X-API-Key if keys are set)
+    POST /markup?uid=<kmedia unit>&language=he&force=false   start a run -> 202 + its state   (X-API-Key if keys are set, else from this host only)
     GET  /markup/{uid}         the markup document, public; 404 until a run is ready
     GET  /markup/{uid}/status  the last run's state, public
     GET  /health
@@ -10,7 +10,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -47,14 +47,23 @@ def _uid(uid: str) -> str:
     return uid
 
 
-def _may_start(key: Optional[str]) -> None:
-    if config.API_KEYS and key not in config.API_KEYS.values():
-        raise HTTPException(401, "X-API-Key required")
+LOOPBACK = ("127.0.0.1", "::1")
+
+
+def _may_start(key: Optional[str], client: Optional[str]) -> None:
+    """With keys set: a key, from anywhere. Without: only from this host (the script next to the service) --
+    reading goes through the proxy, starting a run does not"""
+    if config.API_KEYS:
+        if key not in config.API_KEYS.values():
+            raise HTTPException(401, "X-API-Key required")
+    elif client not in LOOPBACK:
+        raise HTTPException(403, "runs are started from the service's own host")
 
 
 @app.post("/markup", status_code=202)
-def start_markup(uid: str, language: str = "he", force: bool = False, x_api_key: Optional[str] = Header(None)):
-    _may_start(x_api_key)
+def start_markup(request: Request, uid: str, language: str = "he", force: bool = False,
+                 x_api_key: Optional[str] = Header(None)):
+    _may_start(x_api_key, request.client.host if request.client else None)
     uid = _uid(uid)
     if language not in config.LANGUAGES:
         raise HTTPException(400, f"language: one of {', '.join(config.LANGUAGES)}")

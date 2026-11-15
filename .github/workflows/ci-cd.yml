@@ -8,7 +8,7 @@ name: CI/CD
 # SSH goes through a jump host, as for ai-trns -- secrets DEPLOY_HOST, DEPLOY_JUMP_HOST, DEPLOY_KNOWN_HOSTS,
 # DEPLOY_SSH_KEY (the same values as ai-trns's).
 # Settings: secrets ARCHIVE_STT_AI_TRNS_URL, ARCHIVE_STT_AI_TRNS_KEY, ARCHIVE_STT_API_KEYS (name:key,...; empty =
-# anyone may start a run); variables ARCHIVE_STT_DATA_DIR, ARCHIVE_STT_KMEDIA_URL, ARCHIVE_STT_CDN_URL,
+# from the host itself); variables ARCHIVE_STT_DATA_DIR, ARCHIVE_STT_KMEDIA_URL, ARCHIVE_STT_CDN_URL,
 # ARCHIVE_STT_PORT.
 on:
   push:

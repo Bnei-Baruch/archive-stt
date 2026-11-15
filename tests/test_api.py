@@ -69,7 +69,7 @@ def env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(kmedia, "fetch_unit", fetch_unit)
     monkeypatch.setattr(kmedia, "fetch_transcript_html", lambda file_id: "".join(f"<p>{p}</p>" for p in PARAS))
-    return TestClient(app), fake
+    return TestClient(app, client=("127.0.0.1", 50000)), fake
 
 
 def test_the_chain_words_then_speakers_then_markup(env):
@@ -136,3 +136,10 @@ def test_checks(env, monkeypatch):
     assert client.post("/markup", params={"uid": "Unit0001"}).status_code == 401
     assert client.post("/markup", params={"uid": "Unit0001"}, headers={"X-API-Key": "secret"}).status_code == 202
     assert client.get("/markup/Unit0001/status").status_code == 200  # reading stays public
+
+
+def test_without_keys_a_run_is_started_only_from_this_host(env):
+    _, _ = env
+    remote = TestClient(app, client=("10.66.1.1", 50000))
+    assert remote.post("/markup", params={"uid": "Unit0001"}).status_code == 403
+    assert remote.get("/health").status_code == 200
