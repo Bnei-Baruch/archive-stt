@@ -127,6 +127,21 @@ curl -X POST 'http://127.0.0.1:8770/markup?uid=5JBUHZoo'
 Нужен VPN (ai-trns во внутренней сети). На macOS Python из miniconda может не иметь права «Локальная сеть» —
 `No route to host` к внутренним адресам при работающем curl; Homebrew Python работает.
 
+## Docker
+
+Один контейнер, compose без базы (данные — JSON-файлы в каталоге хоста, смонтированном в `/data`).
+`network_mode: host`: ai-trns работает на хосте напрямую, `127.0.0.1:8766` из контейнера до него доходит,
+а запуск без ключей со скрипта на хосте приходит с `127.0.0.1`, как ждёт сервис. Переменные compose
+(в shell или в `.env` рядом с `docker-compose.yml`): `ARCHIVE_STT_ENV_FILE` — настройки сервиса (по умолчанию `.env`),
+`ARCHIVE_STT_DATA_HOST` — каталог данных на хосте (`./data`), `ARCHIVE_STT_UID`/`GID` — его владелец (`10001`).
+
+```bash
+# на хосте ai-tools, вместо systemd-юнита (systemctl disable --now archive-stt)
+ARCHIVE_STT_ENV_FILE=/home/archive-stt/archive-stt.env ARCHIVE_STT_DATA_HOST=/var/lib/archive-stt \
+ARCHIVE_STT_UID=$(id -u archive-stt) ARCHIVE_STT_GID=$(id -g archive-stt) docker compose up -d --build
+docker compose logs -f
+```
+
 ## Сервер
 
 Хост ai-tools, рядом с ai-trns (адрес — у админов / в секрете `DEPLOY_HOST`):

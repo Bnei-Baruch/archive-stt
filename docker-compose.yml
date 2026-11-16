@@ -1,0 +1,20 @@
+# One service, no database: the data is JSON files in a host directory mounted at /data.
+# network_mode: host, because ai-trns runs on the host itself (not in docker): 127.0.0.1:8766 reaches it, and a
+# script on the host starting a run without keys comes from 127.0.0.1, as the service expects (app/main.py).
+# Compose variables (shell or a .env next to this file):
+#   ARCHIVE_STT_ENV_FILE   the service's settings (.env.example); default .env
+#   ARCHIVE_STT_DATA_HOST  the data dir on the host; default ./data
+#   ARCHIVE_STT_UID/GID    who owns that dir on the host; default 10001 (the image's user)
+services:
+  archive-stt:
+    build: .
+    image: archive-stt
+    container_name: archive-stt
+    restart: unless-stopped
+    network_mode: host
+    user: "${ARCHIVE_STT_UID:-10001}:${ARCHIVE_STT_GID:-10001}"
+    env_file: ${ARCHIVE_STT_ENV_FILE:-.env}
+    environment:
+      ARCHIVE_STT_DATA_DIR: /data
+    volumes:
+      - ${ARCHIVE_STT_DATA_HOST:-./data}:/data
