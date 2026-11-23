@@ -1,11 +1,12 @@
-// Package pipeline: a run -- the lesson's audio -> ai-trns words job -> ai-trns speakers job -> words kept,
-// segmentation revision `auto`. Driven by polling (Sync): on every read and by the maintenance loop (SyncAll).
+// Package pipeline: a run -- the lesson's audio -> ai-trns words job -> ai-trns speakers job -> its words
+// (?format=json) and diarization (?format=paragraphs without the text) kept, segmentation revision `auto`. Driven by polling (Sync): on every read and by the maintenance loop (SyncAll).
 // One run per lesson at a time.
 package pipeline
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -81,8 +82,10 @@ func (p *Pipeline) jobDone(id string) (*aitrns.Job, string, error) {
 	return j, "", nil
 }
 
-// BuildSegmentation is the automatic segmentation of a run's words (and the lesson's transcript, if it has one)
-func (p *Pipeline) BuildSegmentation(run *models.Run, answer *models.DiarizeResult) *models.SegmentationData {
+// BuildSegmentation is the automatic segmentation of a run's words and diarization (and the lesson's transcript,
+// if it has one)
+func (p *Pipeline) BuildSegmentation(run *models.Run, words *models.Words,
+	d *models.Diarization) *models.SegmentationData {
 	html := ""
 	if t := run.Data.Transcript; t != nil {
 		var err error
@@ -91,7 +94,38 @@ func (p *Pipeline) BuildSegmentation(run *models.Run, answer *models.DiarizeResu
 			html = ""
 		}
 	}
-	return markup.Build(answer.Paragraphs, html, markup.Duration(run.Data.Media, answer.Paragraphs))
+	return markup.Build(d.Paragraphs, words.Words, html, markup.Duration(run.Data.Media, d.Paragraphs))
+}
+
+// diarizeResult is a finished diarize job's words (?format=json) and paragraphs (?format=paragraphs); failure:
+// the answers do not hold together. A paragraph's words are found again by time (markup.Split): checked here.
+func (p *Pipeline) diarizeResult(jobID string) (*models.Words, *models.DiarizeAnswer, string, error) {
+	b, err := p.AiTrns.Result(jobID, "json")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	words := new(models.Words)
+	if err := json.Unmarshal(b, words); err != nil {
+		return nil, nil, "words: " + err.Error(), nil
+	}
+	if b, err = p.AiTrns.Result(jobID, "paragraphs"); err != nil {
+		return nil, nil, "", err
+	}
+	answer := new(models.DiarizeAnswer)
+	if err := json.Unmarshal(b, answer); err != nil {
+		return nil, nil, "paragraphs: " + err.Error(), nil
+	}
+	starts := make([]float64, len(answer.Paragraphs))
+	for i, ap := range answer.Paragraphs {
+		starts[i] = ap.Start
+	}
+	for i, ws := range markup.Split(starts, words.Words) {
+		if len(ws) != len(answer.Paragraphs[i].Words) {
+			return nil, nil, fmt.Sprintf("paragraph %d: %d words, %d by time", i, len(answer.Paragraphs[i].Words),
+				len(ws)), nil
+		}
+	}
+	return words, answer, "", nil
 }
 
 func failed(run models.Run, msg string) *models.Run {
@@ -134,19 +168,22 @@ func (p *Pipeline) advance(run models.Run) (*models.Run, error) {
 	if j == nil {
 		return &run, nil
 	}
-	b, err := p.AiTrns.Result(j.ID, "paragraphs")
+	words, answer, failure, err := p.diarizeResult(j.ID)
 	if err != nil {
 		return nil, err
 	}
-	answer, err := models.ParseDiarizeResult(b)
-	if err != nil {
-		return failed(run, "speakers: bad answer: "+err.Error()), nil
+	if failure != "" {
+		return failed(run, "speakers: bad answer: "+failure), nil
 	}
-	// first: the segmentation can be rebuilt from it
-	if err := p.Store.SaveWords(run.FileUID, run.ID, answer.Raw); err != nil {
+	d := answer.Diarization()
+	// first: the segmentation can be rebuilt from them
+	if err := p.Store.SaveWords(run.FileUID, run.ID, words); err != nil {
 		return failed(run, "saving the words: "+err.Error()), nil
 	}
-	seg := p.BuildSegmentation(&run, answer)
+	if err := p.Store.SaveDiarization(run.ID, d); err != nil {
+		return failed(run, "saving the diarization: "+err.Error()), nil
+	}
+	seg := p.BuildSegmentation(&run, words, d)
 	if err := p.Store.AddSegmentation(&models.Segmentation{CuUID: run.CuUID, FileUID: run.FileUID,
 		WordsRunID: run.ID, Source: common.RevAuto, Author: run.Author, Data: *seg}); err != nil {
 		return failed(run, "saving the segmentation: "+err.Error()), nil
@@ -287,5 +324,12 @@ func (p *Pipeline) Document(uid string, rev int) (*models.Document, error) {
 	if err != nil || run == nil {
 		return nil, err
 	}
-	return markup.Document(seg, run), nil
+	var words *models.Words // the paragraphs' text, when they are built from the audio
+	if seg.Data.Source == common.SegFromAudio {
+		if words, err = p.Store.LoadWords(run.FileUID, run.ID); err != nil {
+			slog.Warn("no words, the document without the paragraphs' text", "uid", uid, "run", run.ID, "err", err)
+			words = nil
+		}
+	}
+	return markup.Document(seg, run, words), nil
 }

@@ -1,8 +1,10 @@
-// Package markup: the lesson's segmentation (paragraphs, speakers, chapters) from the paragraphs ai-trns gives
-// (words, times, speakers) and, if the lesson has one, its human transcript; and the document served.
+// Package markup: the lesson's segmentation (paragraphs, speakers, chapters) from a run's words and diarization
+// (ai-trns's paragraphs: who speaks, when, reading or not) and, if the lesson has one, its human transcript; and
+// the document served.
 //
 // Paragraph.I, Chapter.PStart / PEnd: index of the <p> element in the transcript's doc2html HTML -- the
-// paragraphs kmedia shows -- or, with no transcript (source "audio"), of the diarize paragraph (its text is given).
+// paragraphs kmedia shows -- or, with no transcript (source "audio"), of the diarize paragraph (the document served
+// gives its text, from the words).
 // Speaker: a role code -- rav / reader / student -- or nil; the client draws the label. Times in seconds of the media.
 //
 // Chapter types (a client shows an unknown one as "other"):
@@ -216,13 +218,47 @@ type HeardWord struct {
 	Reading    bool
 }
 
-// HeardWords are the words of a diarize job's paragraphs, each with its paragraph's role and reading flag
-func HeardWords(ps []models.DiarizeParagraph) []HeardWord {
+// Split gives every paragraph (by its start, in order) its words: those whose middle is before the next
+// paragraph's start. Paragraphs end and start between words, so it holds for rounded times too.
+func Split(starts []float64, words []models.Word) [][]models.Word {
+	out := make([][]models.Word, len(starts))
+	j := 0
+	for k := range starts {
+		a := j
+		for j < len(words) && (k+1 == len(starts) || (words[j].Start+words[j].End)/2 < starts[k+1]) {
+			j++
+		}
+		out[k] = words[a:j]
+	}
+	return out
+}
+
+func diarizeStarts(ps []models.DiarizeParagraph) []float64 {
+	out := make([]float64, len(ps))
+	for i, p := range ps {
+		out[i] = p.Start
+	}
+	return out
+}
+
+// Text is the words joined as ai-trns joins a paragraph's
+func Text(words []models.Word) string {
+	var out []string
+	for _, w := range words {
+		if f := strings.Fields(w.Word); len(f) > 0 {
+			out = append(out, strings.Join(f, " "))
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+// HeardWords are the run's words, each with its diarize paragraph's role and reading flag
+func HeardWords(ps []models.DiarizeParagraph, words []models.Word) []HeardWord {
 	var out []HeardWord
-	for _, p := range ps {
-		role := Role(p)
-		for _, w := range p.Words {
-			out = append(out, HeardWord{Word: w.Word, Start: w.Start, End: w.End, Label: role, Reading: p.Reading})
+	for k, ws := range Split(diarizeStarts(ps), words) {
+		role := Role(ps[k])
+		for _, w := range ws {
+			out = append(out, HeardWord{Word: w.Word, Start: w.Start, End: w.End, Label: role, Reading: ps[k].Reading})
 		}
 	}
 	return out
@@ -425,16 +461,16 @@ func FromTranscript(paras []string, words []HeardWord, duration float64) *models
 }
 
 // FromAudio is the segmentation from the diarize paragraphs alone: reading by the `reading` flag, the Rav after
-// it commentary, a student's turn opens a question
-func FromAudio(ps []models.DiarizeParagraph, duration float64) *models.SegmentationData {
+// it commentary, a student's turn opens a question; titles from the words
+func FromAudio(ps []models.DiarizeParagraph, words []models.Word, duration float64) *models.SegmentationData {
+	texts := Split(diarizeStarts(ps), words)
 	paragraphs := make([]models.Paragraph, 0, len(ps))
 	var chapters []chapter
 	cur := -1 // index into chapters
 	for i, p := range ps {
 		label := Role(p)
-		text := p.Text
 		paragraphs = append(paragraphs, models.Paragraph{I: i, Start: round2(p.Start), End: round2(p.End),
-			Speaker: strPtr(label), Text: &text})
+			Speaker: strPtr(label)})
 		kind := "" // "": the paragraph goes on the current chapter
 		switch {
 		case p.Reading:
@@ -454,7 +490,7 @@ func FromAudio(ps []models.DiarizeParagraph, duration float64) *models.Segmentat
 		if kind != "" {
 			t := ""
 			if kind == "qa" || kind == "reading" {
-				t = title(p.Text)
+				t = title(Text(texts[i]))
 			}
 			chapters = append(chapters, chapter{Type: kind, Title: t, PStart: i, PEnd: i})
 			cur = len(chapters) - 1
@@ -476,13 +512,14 @@ func ravAnswered(ps []models.DiarizeParagraph, a, b int) bool {
 }
 
 // Build is the automatic segmentation: from the transcript if it has marks, else from the audio
-func Build(ps []models.DiarizeParagraph, transcriptHTML string, duration float64) *models.SegmentationData {
+func Build(ps []models.DiarizeParagraph, words []models.Word, transcriptHTML string,
+	duration float64) *models.SegmentationData {
 	if transcriptHTML != "" {
-		if seg := FromTranscript(TranscriptParagraphs(transcriptHTML), HeardWords(ps), duration); seg != nil {
+		if seg := FromTranscript(TranscriptParagraphs(transcriptHTML), HeardWords(ps, words), duration); seg != nil {
 			return seg
 		}
 	}
-	return FromAudio(ps, duration)
+	return FromAudio(ps, words, duration)
 }
 
 // Duration is the media's duration, or the end of the last heard paragraph

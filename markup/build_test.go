@@ -145,35 +145,79 @@ func TestARepeatedPhraseDoesNotMoveAParagraphBack(t *testing.T) {
 	}
 }
 
-func dp(label string, reading bool, start, end float64, text string) models.DiarizeParagraph {
-	return models.DiarizeParagraph{Label: label, Reading: reading, Start: start, End: end, Text: text}
+// dps are diarize paragraphs and their words, one word a second: {label, reading, start, end, text}
+func dps(ps ...[]interface{}) ([]models.DiarizeParagraph, []models.Word) {
+	var out []models.DiarizeParagraph
+	var words []models.Word
+	for _, p := range ps {
+		start, end := p[2].(float64), p[3].(float64)
+		out = append(out, models.DiarizeParagraph{Label: p[0].(string), Reading: p[1].(bool), Start: start, End: end})
+		for k, w := range strings.Fields(p[4].(string)) {
+			words = append(words, models.Word{Word: w, Start: start + float64(k), End: start + float64(k) + 0.5})
+		}
+	}
+	return out, words
+}
+
+func dp(label string, reading bool, start, end float64, text string) []interface{} {
+	return []interface{}{label, reading, start, end, text}
 }
 
 func TestChaptersFromTheAudioWithoutATranscript(t *testing.T) {
-	ps := []models.DiarizeParagraph{dp("קריין", false, 0, 5, "קטע מס 3"), dp("קריין", true, 5, 30, "טקסט המקור"),
+	ps, words := dps(dp("קריין", false, 0, 5, "קטע מס 3"), dp("קריין", true, 5, 30, "טקסט המקור"),
 		dp("הרב", false, 30, 90, "הסבר"), dp("תלמיד", false, 90, 95, "למה?"), dp("הרב", false, 95, 120, "כי"),
-		dp("תלמיד", false, 120, 125, "ועוד?")}
-	seg := FromAudio(ps, 130)
+		dp("תלמיד", false, 120, 125, "ועוד?"))
+	seg := FromAudio(ps, words, 130)
 	var got []span
 	for _, c := range seg.Chapters {
 		got = append(got, span{c.Type, c.PStart, c.PEnd})
 	}
 	eq(t, got, []span{{"other", 0, 0}, {"reading", 1, 1}, {"commentary", 2, 2}, {"qa", 3, 4}, {"qa", 5, 5}})
+	eq(t, []string{seg.Chapters[1].Title, seg.Chapters[3].Title}, []string{"טקסט המקור", "למה?"})
 	p := seg.Paragraphs[3]
-	eq(t, []interface{}{p.I, p.Start, p.End, speaker(p), *p.Text}, []interface{}{3, 90.0, 95.0, "student", "למה?"})
+	eq(t, []interface{}{p.I, p.Start, p.End, speaker(p), p.Text}, []interface{}{3, 90.0, 95.0, "student", (*string)(nil)})
 	eq(t, []string{speaker(seg.Paragraphs[0]), speaker(seg.Paragraphs[1]), speaker(seg.Paragraphs[2])},
 		[]string{"reader", "reader", "rav"})
 }
 
 func TestBuildFallsBackToTheAudioWithoutMarks(t *testing.T) {
-	ps := []models.DiarizeParagraph{{Label: "הרב", Start: 0, End: 5, Text: "שלום",
-		Words: []models.Word{{Word: "שלום", Start: 0, End: 1}}}}
-	seg := Build(ps, "<p>בלי סימנים</p>", 10)
+	ps, words := dps(dp("הרב", false, 0, 5, "שלום"))
+	seg := Build(ps, words, "<p>בלי סימנים</p>", 10)
 	eq(t, seg.Source, "audio")
 	eq(t, speaker(seg.Paragraphs[0]), "rav")
 	eq(t, len(seg.Chapters), 1)
 	eq(t, seg.Chapters[0].Type, "other")
 	eq(t, seg.Stats["chapters"], 1)
+}
+
+func TestSplitGivesEveryParagraphItsWords(t *testing.T) {
+	w := func(word string, start, end float64) models.Word { return models.Word{Word: word, Start: start, End: end} }
+	words := []models.Word{w("א", 0.462, 0.824), w("ב", 0.884, 1.447), w("ג", 1.5, 1.6), w("ד", 2.003, 2.4),
+		w("ה", 2.5, 2.5)}
+	// the times as stored (rounded to 0.01) split as the exact ones
+	for _, starts := range [][]float64{{0.462, 1.5, 2.003}, {0.46, 1.5, 2.0}} {
+		var got []string
+		for _, ws := range Split(starts, words) {
+			got = append(got, Text(ws))
+		}
+		eq(t, got, []string{"א ב", "ג", "ד ה"})
+	}
+	eq(t, len(Split(nil, words)), 0)
+	eq(t, Text([]models.Word{w(" שלום ", 0, 1), w("  ", 1, 2), w("עולם", 2, 3)}), "שלום עולם")
+}
+
+func TestTheDocumentGivesTextFromTheWordsWithoutATranscript(t *testing.T) {
+	ps, words := dps(dp("הרב", false, 0, 5, "שלום חברים"), dp("תלמיד", false, 10, 15, "שאלה קצרה"))
+	seg := &models.Segmentation{CuUID: "Unit0001", Rev: 1, Data: *FromAudio(ps, words, 20)}
+	run := &models.Run{ID: "r1", Language: "he"}
+	doc := Document(seg, run, &models.Words{Words: words})
+	eq(t, []string{*doc.Paragraphs[0].Text, *doc.Paragraphs[1].Text}, []string{"שלום חברים", "שאלה קצרה"})
+	if seg.Data.Paragraphs[0].Text != nil {
+		t.Fatal("the stored revision got the text")
+	}
+	if Document(seg, run, nil).Paragraphs[0].Text != nil {
+		t.Fatal("text without words")
+	}
 }
 
 func TestSpeakerRolesFromAiTrns(t *testing.T) {

@@ -1,9 +1,12 @@
 // Package store: everything archive-stt keeps, under the data dir, never expired:
 //
-//	archive-stt.db                    SQLite: runs (run) and the lesson's segmentation revisions (segmentation)
-//	words/{file_uid}/{run_id}.json    what ai-trns answered for that media file (paragraphs with words, times,
-//	                                  speakers): the immutable layer, the input of a rebuild. The same file may be
-//	                                  transcribed again by another model -- a new run_id next to the old one.
+//	archive-stt.db                    SQLite: runs (run), their diarization (diarization) and the lesson's
+//	                                  segmentation revisions (segmentation)
+//	words/{file_uid}/{run_id}.json    the media file's words with their times ({"words": [{word, start, end}]}):
+//	                                  the immutable layer. The same file may be transcribed again by another
+//	                                  model -- a new run_id next to the old one.
+//
+// Words + diarization are the input of a rebuild of the automatic segmentation.
 //
 // Lessons and files are MDB's (through kmedia): nothing of them is kept but the file_uid the data is built from.
 package store
@@ -62,17 +65,49 @@ func (s *Store) WordsPath(fileUID, runID string) string {
 	return s.Path("words", fileUID, runID+".json")
 }
 
-// SaveWords keeps ai-trns's answer as it came
-func (s *Store) SaveWords(fileUID, runID string, raw json.RawMessage) error {
-	return utils.WriteJSON(s.WordsPath(fileUID, runID), raw)
+// SaveWords writes the run's words file
+func (s *Store) SaveWords(fileUID, runID string, w *models.Words) error {
+	return utils.WriteJSON(s.WordsPath(fileUID, runID), w)
 }
 
-func (s *Store) LoadWords(fileUID, runID string) (*models.DiarizeResult, error) {
+func (s *Store) LoadWords(fileUID, runID string) (*models.Words, error) {
 	b, err := os.ReadFile(s.WordsPath(fileUID, runID))
 	if err != nil {
 		return nil, err
 	}
-	return models.ParseDiarizeResult(b)
+	w := new(models.Words)
+	if err := json.Unmarshal(b, w); err != nil {
+		return nil, fmt.Errorf("words %s/%s: %w", fileUID, runID, err)
+	}
+	return w, nil
+}
+
+// diarization: immutable, one per run
+
+func (s *Store) SaveDiarization(runID string, d *models.Diarization) error {
+	data, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec("INSERT INTO diarization (run_id, data) VALUES (?, ?)", runID, string(data))
+	return err
+}
+
+// Diarization is the run's diarization, or nil
+func (s *Store) Diarization(runID string) (*models.Diarization, error) {
+	var data string
+	err := s.DB.QueryRow("SELECT data FROM diarization WHERE run_id = ?", runID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	d := new(models.Diarization)
+	if err := json.Unmarshal([]byte(data), d); err != nil {
+		return nil, fmt.Errorf("diarization %s: %w", runID, err)
+	}
+	return d, nil
 }
 
 // runs

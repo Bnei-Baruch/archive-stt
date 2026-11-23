@@ -21,7 +21,8 @@
 
 - **Уроки и файлы — из MDB** (uid, язык, оригинал/перевод, sha1, длительность). Своих таблиц `cu`
   и `media_file` нет. Храним только, из какого `file_uid` построены данные.
-- **Слова — неизменяемый слой**, JSON-файлы: `words/<file_uid>/<run_id>.json` (по сути нынешний `stt/`).
+- **Слова — неизменяемый слой**, JSON-файлы: `words/<file_uid>/<run_id>.json` — только слова:
+  `{"words": [{word, start, end}]}` (ai-trns diarize `?format=json` без `speaker` и `cue`).
   `run_id` нужен, потому что тот же файл можно перераспознать другой моделью.
   `sha` в ключе не нужен: в MDB заменённый файл всегда получает новый `file_uid` (проверено).
 - **Источник слов — VTT, если есть.** VTT-субтитры MDB, созданные **до 2027** (дата создания файла в MDB), —
@@ -30,7 +31,10 @@
   ai-trns `/diarize/words` (он и сейчас так делает с SRT от `/jobs`: CTC forced alignment каждого слова внутри
   реплики, VAD — если не вышло; языки `he`/`en`/`ru`). Нет VTT → STT
   ai-trns, как сейчас (стандартный путь). Более поздние VTT не используем.
-  Спикеры и абзацы — из того же `/diarize/words`, в обоих случаях.
+  Спикеры и абзацы — из того же `/diarize/words`, в обоих случаях: `?format=paragraphs` без текста и слов —
+  таблица `diarization` (одна на запуск, неизменяемая). Слова абзаца — по времени. Слова + диаризация (+ транскрипт)
+  → `segmentation` `auto`; её можно пересобрать без ai-trns. Формат `json` ai-trns не меняем; нужно ещё что-то —
+  новый эндпоинт ai-trns.
 - **Всё остальное привязано ко времени**: `file_uid + секунды`, не к индексам слов. Тогда смена модели STT
   ничего не ломает: границы при показе прилипают к ближайшему промежутку между словами.
 - **База — SQLite** (файл в `DATA_DIR`): одновременные правки, история, запросы поперёк уроков,
@@ -43,9 +47,12 @@
 ```
 segmentation  cu_uid, rev, file_uid, words_run_id,
               source (auto|human|migrated), based_on, author, created,
-              data json: paragraphs [{start, end, speaker}],
+              data json: paragraphs [{start, end, speaker}],   без текста: документ без транскрипта берёт его из слов
                          chapters   [{type, title, start, end}]
               первичный ключ (cu_uid, rev)
+
+diarization   run_id, data json: paragraphs [{speaker, label, reading, start, end}]   ai-trns ?format=paragraphs
+              без text и words; неизменяемая, одна на запуск
 
 annotation    id, cu_uid, kind (clip|drawing|slide|link|note|…),
               file_uid, start_s, end_s (end_s = start_s — момент),
@@ -281,6 +288,12 @@ archive-stt:
 - [x] Пути под `/cus/{uid}/…`: `GET /cus/{uid}/markup` из текущей ревизии (коды спикеров, `original_lang`),
       `POST /cus/{uid}/markup`, `GET /cus/{uid}/runs[/latest|/{id}]`. Старые `/markup…` убрать — на проде ещё
       ничего нет, совместимость не нужна.
+- [x] Слова отдельно от диаризации: `words/…json` — только слова (`?format=json`), таблица `diarization` —
+      `?format=paragraphs` без текста и слов; в `segmentation` текста нет, `/markup` без транскрипта берёт его из слов.
+- [ ] `POST /cus/{uid}/rebuild` — новая ревизия `auto` из сохранённых слов и диаризации запуска (по умолчанию
+      последнего готового) и текущего транскрипта kmedia, без ai-trns. Когда: поменялся алгоритм сборки, у урока
+      появился или изменился транскрипт. Ручные ревизии не трогает (текущей остаётся ручная). Массово —
+      `archive-stt markup --rebuild`.
 
 ### Этап 2 — поиск: время фрагментов и время ↔ текст (первоочередное)
 

@@ -39,10 +39,10 @@ var paras = []string{
 
 var markRE = strings.NewReplacer("קריין:", "", "שאלה:", "", "תלמיד:", "")
 
-// paragraphsAnswer is what ai-trns answers to ?format=paragraphs: a paragraph per run of one speaker (the header,
-// paragraph 1, is not spoken)
-func paragraphsAnswer() []byte {
-	var out []map[string]interface{}
+// diarizeAnswer is what ai-trns answers to ?format=paragraphs -- a paragraph per run of one speaker (the header,
+// paragraph 1, is not spoken) -- and to ?format=json: the same words, each with its speaker and cue
+func diarizeAnswer(format string) []byte {
+	var out, all []map[string]interface{}
 	t := 0.0
 	for i, p := range paras {
 		if i == 1 {
@@ -57,6 +57,8 @@ func paragraphsAnswer() []byte {
 		}
 		for _, tok := range strings.Fields(markRE.Replace(p)) {
 			w := map[string]interface{}{"word": tok, "start": t, "end": t + 0.25}
+			all = append(all, map[string]interface{}{"word": tok, "start": t, "end": t + 0.25, "speaker": label,
+				"cue": i})
 			if n := len(out); n > 0 && out[n-1]["label"] == label {
 				out[n-1]["words"] = append(out[n-1]["words"].([]map[string]interface{}), w)
 			} else {
@@ -74,6 +76,11 @@ func paragraphsAnswer() []byte {
 			text = append(text, w["word"].(string))
 		}
 		p["text"] = strings.Join(text, " ")
+	}
+	if format == "json" {
+		b, _ := json.Marshal(map[string]interface{}{"version": 1, "kind": "diarize", "words": all,
+			"stats": map[string]interface{}{"speakers": 3}})
+		return b
 	}
 	b, _ := json.Marshal(map[string]interface{}{"paragraphs": out, "stats": map[string]interface{}{"paragraphs": len(out)}})
 	return b
@@ -113,8 +120,8 @@ func (f *fakeAiTrns) Result(id, format string) ([]byte, error) {
 	switch id + "/" + format {
 	case "w1/srt":
 		return []byte("1\n00:00:00,000 --> 00:00:01,000\nשלום\n"), nil
-	case "s1/paragraphs":
-		return paragraphsAnswer(), nil
+	case "s1/paragraphs", "s1/json":
+		return diarizeAnswer(format), nil
 	}
 	return nil, &aitrns.Error{}
 }
@@ -256,10 +263,25 @@ func TestTheChainWordsThenSpeakersThenMarkup(t *testing.T) {
 	e.do("GET", "/cus/Unit0001/markup?rev=1", byRev)
 	check(t, byRev, doc)
 	check(t, e.do("GET", "/cus/Unit0001/markup?rev=2", nil).Code, 404)
-	// ai-trns's answer is kept by the media file, so the markup can be rebuilt without it
+	// the words (by the media file) and the diarization (by the run) are kept, so the markup can be rebuilt
+	// without ai-trns
 	words, err := e.p.Store.LoadWords("AudioOr1", run.ID)
-	if err != nil || len(words.Paragraphs) == 0 {
+	if err != nil || len(words.Words) == 0 {
 		t.Fatalf("words: %v", err)
+	}
+	d, err := e.p.Store.Diarization(run.ID)
+	if err != nil || d == nil || len(d.Paragraphs) == 0 {
+		t.Fatalf("diarization: %v", err)
+	}
+	rebuilt := e.p.BuildSegmentation(run, words, d)
+	seg, _ := e.p.Store.Segmentation("Unit0001", 1)
+	a, _ := json.Marshal(rebuilt)
+	b, _ := json.Marshal(seg.Data)
+	check(t, string(a), string(b))
+	for _, p := range doc.Paragraphs {
+		if p.Text != nil {
+			t.Fatal("a paragraph of the transcript got the text of the words")
+		}
 	}
 }
 

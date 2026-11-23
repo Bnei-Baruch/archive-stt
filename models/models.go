@@ -1,8 +1,6 @@
 // Package models: the data archive-stt keeps and serves.
 package models
 
-import "encoding/json"
-
 // FileRef is a kmedia (MDB) file by its uid
 type FileRef struct {
 	FileUID string `json:"file_uid"`
@@ -50,7 +48,8 @@ type Run struct {
 }
 
 // Paragraph is a paragraph on the media's time line. I: the index of the <p> in the transcript's doc2html, or of
-// the ai-trns paragraph when there is no transcript (then Text is set). Speaker: a role code or nil.
+// the diarize paragraph when there is no transcript. Speaker: a role code or nil. Text is not stored: the document
+// served fills it from the run's words when there is no transcript.
 type Paragraph struct {
 	I       int     `json:"i"`
 	Start   float64 `json:"start"`
@@ -97,32 +96,44 @@ type Word struct {
 	End   float64 `json:"end"`
 }
 
-// DiarizeParagraph is a paragraph of ai-trns's /diarize/words result (?format=paragraphs)
+// Words is the words file (words/{file_uid}/{run_id}.json): every heard word of the media file in order, as
+// ai-trns's diarize job timed it (?format=json, CTC forced alignment); the immutable layer
+type Words struct {
+	Words []Word `json:"words"`
+}
+
+// DiarizeParagraph is a paragraph of ai-trns's diarize job (?format=paragraphs) without its text and words: who
+// speaks (Speaker: "Rav", "Reader", SPEAKER_NN; Label: its display name), whether the source is read, when. A
+// paragraph's words are those of the run's words between its start and the next one's.
 type DiarizeParagraph struct {
 	Speaker string  `json:"speaker"`
 	Label   string  `json:"label"`
 	Reading bool    `json:"reading"`
 	Start   float64 `json:"start"`
 	End     float64 `json:"end"`
-	Text    string  `json:"text"`
-	Words   []Word  `json:"words"`
 }
 
-// DiarizeResult is ai-trns's answer; Raw is kept as it came (the words file)
-type DiarizeResult struct {
-	Paragraphs []DiarizeParagraph     `json:"paragraphs"`
-	Stats      map[string]interface{} `json:"stats"`
-	Raw        json.RawMessage        `json:"-"`
+// Diarization is a run's diarization as ai-trns gave it, without the text (table diarization)
+type Diarization struct {
+	Paragraphs []DiarizeParagraph `json:"paragraphs"`
 }
 
-// ParseDiarizeResult decodes ai-trns's answer and keeps its bytes
-func ParseDiarizeResult(b []byte) (*DiarizeResult, error) {
-	r := new(DiarizeResult)
-	if err := json.Unmarshal(b, r); err != nil {
-		return nil, err
+// DiarizeAnswer is ai-trns's ?format=paragraphs answer
+type DiarizeAnswer struct {
+	Paragraphs []struct {
+		DiarizeParagraph
+		Words []Word `json:"words"`
+	} `json:"paragraphs"`
+	Stats map[string]interface{} `json:"stats"`
+}
+
+// Diarization is the answer without the text and the words
+func (a *DiarizeAnswer) Diarization() *Diarization {
+	d := &Diarization{Paragraphs: make([]DiarizeParagraph, len(a.Paragraphs))}
+	for i, p := range a.Paragraphs {
+		d.Paragraphs[i] = p.DiarizeParagraph
 	}
-	r.Raw = append(json.RawMessage(nil), b...)
-	return r, nil
+	return d
 }
 
 // Document is the markup document served (GET /cus/{uid}/markup)
