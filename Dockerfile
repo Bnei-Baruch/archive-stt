@@ -1,19 +1,17 @@
-FROM python:3.12-slim
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG PRE_RELEASE=""
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X github.com/Bnei-Baruch/archive-stt/version.PreRelease=${PRE_RELEASE}" -o /archive-stt .
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    ARCHIVE_STT_DATA_DIR=/data ARCHIVE_STT_PORT=8770
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app ./app
-
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /archive-stt /archive-stt
 # the data dir is a volume; its owner on the host must match the user the container runs as (compose: user)
-RUN useradd --system --uid 10001 --no-create-home archive-stt && mkdir -p /data && chown archive-stt: /data
-USER archive-stt
+ENV ARCHIVE_STT_DATA_DIR=/data ARCHIVE_STT_SERVER_BIND_ADDRESS=:8770
 VOLUME /data
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"ARCHIVE_STT_PORT\"]}/health', timeout=4)"
-
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"$ARCHIVE_STT_PORT\""]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["/archive-stt", "health"]
+ENTRYPOINT ["/archive-stt"]
+CMD ["server"]

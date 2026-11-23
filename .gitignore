@@ -1,9 +1,10 @@
 .env
-.venv/
+config.toml
 data/
-__pycache__/
-.pytest_cache/
 .DS_Store
+/archive-stt
+/archive-stt-linux-amd64
 local/
 markup-ok.txt
 markup-failed.txt
+.venv/

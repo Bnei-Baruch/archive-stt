@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 User=archive-stt
-WorkingDirectory=/home/archive-stt/app
+WorkingDirectory=/home/archive-stt
 EnvironmentFile=/home/archive-stt/archive-stt.env
-ExecStart=/home/archive-stt/env/bin/uvicorn app.main:app --host 0.0.0.0 --port ${ARCHIVE_STT_PORT}
+ExecStart=/home/archive-stt/bin/archive-stt server
 Restart=on-failure
 RestartSec=5
 
