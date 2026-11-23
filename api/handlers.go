@@ -127,6 +127,35 @@ func (h *Handlers) GetMarkup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
+// GetTimecode: GET /cus/{uid}/timecode?lang= -> the time of every word of the transcript, by its <p> and its place
+// there; 404 without markup, a transcript or in another language (translations: not yet)
+func (h *Handlers) GetTimecode(w http.ResponseWriter, r *http.Request) {
+	uid, ok := uidParam(w, r)
+	if !ok {
+		return
+	}
+	lang := r.URL.Query().Get("lang")
+	if lang != "" && !common.IsLanguage(lang) {
+		fail(w, http.StatusBadRequest, "lang: one of "+strings.Join(common.Languages, ", "))
+		return
+	}
+	if _, err := h.Pipeline.Sync(uid); err != nil {
+		internal(w, r, err)
+		return
+	}
+	tc, err := h.Pipeline.Timecode(uid, lang)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, public)
+	if tc == nil {
+		fail(w, http.StatusNotFound, "no timecode for this lesson: no markup on a transcript (in this language)")
+		return
+	}
+	writeJSON(w, http.StatusOK, tc)
+}
+
 // GetRuns: GET /cus/{uid}/runs -> the lesson's runs, newest first
 func (h *Handlers) GetRuns(w http.ResponseWriter, r *http.Request) {
 	uid, ok := uidParam(w, r)

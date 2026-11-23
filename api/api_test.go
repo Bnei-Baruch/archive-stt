@@ -593,3 +593,38 @@ func TestTheTranscriptWordsAreAlignedAtARunsEndAndAtARebuild(t *testing.T) {
 	a, _ = e.p.Store.LoadAlignment("TextDoc1", run.ID)
 	check(t, a.Stats["words"], 2)
 }
+
+func TestTimecodeGivesEveryWordOfTheTranscriptItsTime(t *testing.T) {
+	e := newEnv(t)
+	check(t, e.do("GET", "/cus/Unit0001/timecode", nil).Code, 404)
+	run := new(models.Run)
+	e.do("POST", "/cus/Unit0001/markup", run)
+	e.finish()
+	tc := new(models.Timecode)
+	rec := e.do("GET", "/cus/Unit0001/timecode", tc)
+	check(t, rec.Code, 200)
+	check(t, rec.Header().Get("Cache-Control"), "public, max-age=300")
+	check(t, []interface{}{tc.UID, tc.Language, tc.Transcript.FileUID, tc.RunID, tc.Rev, len(tc.Paragraphs)},
+		[]interface{}{"Unit0001", "he", "TextDoc1", run.ID, 1, len(paras)})
+	for i, p := range paras {
+		check(t, len(tc.Paragraphs[i]), len(strings.Fields(p)))
+	}
+	// in order of the text
+	last := 0.0
+	for _, ws := range tc.Paragraphs {
+		for _, s := range ws {
+			if s < last {
+				t.Fatalf("time back: %v after %v", s, last)
+			}
+			last = s
+		}
+	}
+	check(t, e.do("GET", "/cus/Unit0001/timecode?lang=he", nil).Code, 200)
+	check(t, e.do("GET", "/cus/Unit0001/timecode?lang=ru", nil).Code, 404) // translations: not yet
+	check(t, e.do("GET", "/cus/Unit0001/timecode?lang=xx", nil).Code, 400)
+
+	// no transcript: none
+	e.km.unit.Files = e.km.unit.Files[:2]
+	e.do("POST", "/cus/Unit0001/rebuild", nil)
+	check(t, e.do("GET", "/cus/Unit0001/timecode", nil).Code, 404)
+}

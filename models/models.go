@@ -122,6 +122,18 @@ type Alignment struct {
 	Stats      map[string]int  `json:"stats"` // words, eq, sub
 }
 
+// Timecode is the time of every word of the lesson's transcript (GET /cus/{uid}/timecode): Paragraphs[p][w] is
+// the start of the w-th whitespace token of the p-th <p> of the transcript's doc2html, in seconds of the media
+type Timecode struct {
+	UID        string      `json:"uid"`
+	Language   string      `json:"language"`
+	Transcript FileRef     `json:"transcript"`
+	Media      Media       `json:"media"`
+	RunID      string      `json:"run_id"`
+	Rev        int         `json:"rev"` // the segmentation revision it is taken from (the current one)
+	Paragraphs [][]float64 `json:"paragraphs"`
+}
+
 // DiarizeParagraph is a paragraph of ai-trns's diarize job (?format=paragraphs) without its text and words: who
 // speaks (Speaker: "Rav", "Reader", SPEAKER_NN; Label: its display name), whether the source is read, when. A
 // paragraph's words are those of the run's words between its start and the next one's.

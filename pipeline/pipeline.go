@@ -530,3 +530,29 @@ func (p *Pipeline) Document(uid string, rev int) (*models.Document, error) {
 	}
 	return markup.Document(seg, run, words), nil
 }
+
+// Timecode is the time of every word of the transcript of the lesson's current revision, in language ("": the
+// run's); nil if there is no markup, no transcript, no alignment kept or the markup is in another language
+func (p *Pipeline) Timecode(uid, language string) (*models.Timecode, error) {
+	seg, err := p.Store.Segmentation(uid, 0)
+	if err != nil || seg == nil || seg.Data.Transcript == nil {
+		return nil, err
+	}
+	run, err := p.Store.GetRun(seg.WordsRunID)
+	if err != nil || run == nil || (language != "" && language != run.Language) {
+		return nil, err
+	}
+	a, err := p.Store.LoadAlignment(seg.Data.Transcript.FileUID, run.ID)
+	if err != nil || a == nil {
+		return nil, err
+	}
+	out := &models.Timecode{UID: uid, Language: run.Language, Transcript: *seg.Data.Transcript, Media: run.Data.Media,
+		RunID: run.ID, Rev: seg.Rev, Paragraphs: make([][]float64, len(a.Paragraphs))}
+	for i, ws := range a.Paragraphs {
+		out.Paragraphs[i] = make([]float64, len(ws))
+		for k, w := range ws {
+			out.Paragraphs[i][k] = w.Start
+		}
+	}
+	return out, nil
+}
