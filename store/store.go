@@ -18,6 +18,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,17 +32,19 @@ import (
 
 type Store struct {
 	Dir string
-	DB  *sql.DB
+	DB  *sql.DB // the writer: one connection, SQLite takes one writer at a time
+	RO  *sql.DB // the readers: WAL lets them read while the writer writes
 }
+
+const readers = 8
 
 // Open opens (creating) the store in dir and applies the migrations
 func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + filepath.Join(dir, "archive-stt.db") +
-		"?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
+	file := "file:" + filepath.Join(dir, "archive-stt.db") + "?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", file+"&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, err
 	}
@@ -51,11 +54,19 @@ func Open(dir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{Dir: dir, DB: db}, nil
+	// opened after the migrations (WAL is set on the file by then); query_only: a write here is an error
+	ro, err := sql.Open("sqlite", file+"&_pragma=query_only(1)")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	ro.SetMaxOpenConns(readers)
+	ro.SetMaxIdleConns(readers)
+	return &Store{Dir: dir, DB: db, RO: ro}, nil
 }
 
 func (s *Store) Close() error {
-	return s.DB.Close()
+	return errors.Join(s.RO.Close(), s.DB.Close())
 }
 
 // Path is a path under the data dir
@@ -126,7 +137,7 @@ func (s *Store) SaveDiarization(runID string, d *models.Diarization) error {
 // Diarization is the run's diarization, or nil
 func (s *Store) Diarization(runID string) (*models.Diarization, error) {
 	var data string
-	err := s.DB.QueryRow("SELECT data FROM diarization WHERE run_id = ?", runID).Scan(&data)
+	err := s.RO.QueryRow("SELECT data FROM diarization WHERE run_id = ?", runID).Scan(&data)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -188,18 +199,18 @@ func (s *Store) SaveRun(r *models.Run) error {
 
 // GetRun is the run, or nil
 func (s *Store) GetRun(id string) (*models.Run, error) {
-	return scanRun(s.DB.QueryRow("SELECT "+runCols+" FROM run WHERE id = ?", id))
+	return scanRun(s.RO.QueryRow("SELECT "+runCols+" FROM run WHERE id = ?", id))
 }
 
 // LatestRun is the lesson's newest run, or nil
 func (s *Store) LatestRun(cuUID string) (*models.Run, error) {
-	return scanRun(s.DB.QueryRow("SELECT "+runCols+" FROM run WHERE cu_uid = ? ORDER BY created DESC, rowid DESC "+
+	return scanRun(s.RO.QueryRow("SELECT "+runCols+" FROM run WHERE cu_uid = ? ORDER BY created DESC, rowid DESC "+
 		"LIMIT 1", cuUID))
 }
 
 // Runs are the lesson's runs, newest first
 func (s *Store) Runs(cuUID string) ([]*models.Run, error) {
-	rows, err := s.DB.Query("SELECT "+runCols+" FROM run WHERE cu_uid = ? ORDER BY created DESC, rowid DESC", cuUID)
+	rows, err := s.RO.Query("SELECT "+runCols+" FROM run WHERE cu_uid = ? ORDER BY created DESC, rowid DESC", cuUID)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +228,7 @@ func (s *Store) Runs(cuUID string) ([]*models.Run, error) {
 
 // PendingUIDs are the lessons with a pending run
 func (s *Store) PendingUIDs() ([]string, error) {
-	rows, err := s.DB.Query("SELECT DISTINCT cu_uid FROM run WHERE status = 'pending'")
+	rows, err := s.RO.Query("SELECT DISTINCT cu_uid FROM run WHERE status = 'pending'")
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +246,7 @@ func (s *Store) PendingUIDs() ([]string, error) {
 
 func (s *Store) CountRuns() (int, error) {
 	var n int
-	err := s.DB.QueryRow("SELECT COUNT(*) FROM run").Scan(&n)
+	err := s.RO.QueryRow("SELECT COUNT(*) FROM run").Scan(&n)
 	return n, err
 }
 
@@ -287,7 +298,7 @@ func (s *Store) AddSegmentation(g *models.Segmentation) error {
 
 // LastAuto is the lesson's last revision auto built on the run, or nil
 func (s *Store) LastAuto(cuUID, runID string) (*models.Segmentation, error) {
-	return scanSegmentation(s.DB.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? AND "+
+	return scanSegmentation(s.RO.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? AND "+
 		"words_run_id = ? AND source = 'auto' ORDER BY rev DESC LIMIT 1", cuUID, runID))
 }
 
@@ -295,17 +306,17 @@ func (s *Store) LastAuto(cuUID, runID string) (*models.Segmentation, error) {
 // last auto; nil if none
 func (s *Store) Segmentation(cuUID string, rev int) (*models.Segmentation, error) {
 	if rev > 0 {
-		return scanSegmentation(s.DB.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? AND rev = ?",
+		return scanSegmentation(s.RO.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? AND rev = ?",
 			cuUID, rev))
 	}
-	return scanSegmentation(s.DB.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? "+
+	return scanSegmentation(s.RO.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? "+
 		"ORDER BY source = 'auto', rev DESC LIMIT 1", cuUID))
 }
 
 // WithoutTranscript are the content units whose current revision has no transcript (built from the audio), in language
 // ("": any): uid and the language of the revision's run, by uid
 func (s *Store) WithoutTranscript(language string) ([]models.UnitRef, error) {
-	rows, err := s.DB.Query(`
+	rows, err := s.RO.Query(`
 SELECT g.cu_uid, r.language
 FROM (SELECT cu_uid, words_run_id, data,
              ROW_NUMBER() OVER (PARTITION BY cu_uid ORDER BY source = 'auto', rev DESC) AS n

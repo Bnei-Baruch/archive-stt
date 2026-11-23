@@ -1,7 +1,9 @@
 package store
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/Bnei-Baruch/archive-stt/migrations"
 )
@@ -49,5 +51,48 @@ func TestMigrationMovesTheTranscriptFromTheRunToTheRevision(t *testing.T) {
 	s.DB.QueryRow("SELECT data FROM run WHERE id = 'r1'").Scan(&data)
 	if data != `{"media":{"file_uid":"AudioOr1"}}` {
 		t.Fatal(data)
+	}
+}
+
+// Readers do not wait for the writer: a read goes through while a write transaction is open; and they cannot write
+func TestReadersDoNotWaitForTheWriter(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	tx, err := s.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO run (id, cu_uid, kind, language, file_uid, stage, status, words_source, created,
+		updated) VALUES ('r1', 'Unit0001', 'first', 'he', 'AudioOr1', 'words', 'pending', 'stt', 'x', 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		n, err := s.CountRuns()
+		if err == nil && n != 0 {
+			err = fmt.Errorf("%d runs before the commit", n)
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read waits for the writer")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountRuns(); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	if _, err := s.RO.Exec("DELETE FROM run"); err == nil {
+		t.Fatal("a reader wrote")
 	}
 }
