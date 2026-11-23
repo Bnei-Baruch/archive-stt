@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -468,6 +469,7 @@ type rebuilt struct {
 	Source     string                 `json:"source"`
 	Transcript *models.FileRef        `json:"transcript"`
 	Stats      map[string]interface{} `json:"stats"`
+	Alignment  map[string]int         `json:"alignment"`
 }
 
 func TestRebuildFromTheKeptWordsAndDiarization(t *testing.T) {
@@ -552,4 +554,42 @@ func TestATranscriptThatCannotBeHadAtARunsEndGivesTheAudioNotAFailure(t *testing
 	doc := new(models.Document)
 	e.do("GET", "/cus/Unit0001/markup", doc)
 	check(t, []interface{}{doc.Run.Source, doc.Transcript}, []interface{}{"audio", (*models.FileRef)(nil)})
+}
+
+func TestTheTranscriptWordsAreAlignedAtARunsEndAndAtARebuild(t *testing.T) {
+	e := newEnv(t)
+	run := new(models.Run)
+	e.do("POST", "/cus/Unit0001/markup", run)
+	e.finish()
+	path := e.p.Store.AlignmentPath("TextDoc1", run.ID)
+	a, err := e.p.Store.LoadAlignment("TextDoc1", run.ID)
+	if err != nil || a == nil {
+		t.Fatalf("no alignment at the run's end: %v", err)
+	}
+	check(t, len(a.Paragraphs), len(paras))
+	if a.Stats["words"] == 0 || a.Stats["eq"] == 0 {
+		t.Fatalf("alignment stats %v", a.Stats)
+	}
+
+	// an unchanged rebuild writes it all the same (an older build has none)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	out := new(rebuilt)
+	e.do("POST", "/cus/Unit0001/rebuild", out)
+	check(t, out.Unchanged, true)
+	check(t, out.Alignment, a.Stats)
+	if again, _ := e.p.Store.LoadAlignment("TextDoc1", run.ID); again == nil {
+		t.Fatal("no alignment after an unchanged rebuild")
+	}
+
+	// a transcript without marks: the segmentation is the audio's, its words are aligned all the same
+	e.km.transcript = "<p>שלום עולם</p>"
+	e.do("POST", "/cus/Unit0001/rebuild", out)
+	check(t, []interface{}{out.Source, *out.Transcript}, []interface{}{"audio", models.FileRef{FileUID: "TextDoc1"}})
+	doc := new(models.Document)
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	check(t, doc.Transcript, (*models.FileRef)(nil)) // the paragraphs are not its <p>
+	a, _ = e.p.Store.LoadAlignment("TextDoc1", run.ID)
+	check(t, a.Stats["words"], 2)
 }

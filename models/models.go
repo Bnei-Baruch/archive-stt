@@ -69,8 +69,10 @@ type Chapter struct {
 
 // SegmentationData is the content of a segmentation revision
 type SegmentationData struct {
-	Source     string                 `json:"source"`               // transcript | audio
-	Transcript *FileRef               `json:"transcript,omitempty"` // the kmedia transcript it is built on
+	Source string `json:"source"` // transcript | audio
+	// the kmedia transcript at the build: the paragraphs' I are its <p> if Source is transcript; its words are
+	// aligned (Alignment) whatever the Source
+	Transcript *FileRef               `json:"transcript,omitempty"`
 	Paragraphs []Paragraph            `json:"paragraphs"`
 	Chapters   []Chapter              `json:"chapters"`
 	Stats      map[string]interface{} `json:"stats"`
@@ -100,6 +102,24 @@ type Word struct {
 // ai-trns's diarize job timed it (?format=json, CTC forced alignment); the immutable layer
 type Words struct {
 	Words []Word `json:"words"`
+}
+
+// AlignedWord is a word of the transcript with its time on the media. Text: the token as written (punctuation
+// kept). Match: "eq" the same heard word, "sub" another heard word in its place (its time), "" not heard -- its
+// time shares the gap between its matched neighbours.
+type AlignedWord struct {
+	Text  string  `json:"t"`
+	Start float64 `json:"s"`
+	End   float64 `json:"e"`
+	Match string  `json:"m,omitempty"`
+}
+
+// Alignment is the transcript's words on a run's words (align/{transcript_file_uid}/{run_id}.json): Paragraphs[p]
+// are the whitespace tokens of the p-th <p> of its doc2html (empty for an empty <p>), in order. Derived: built
+// again from the words and the transcript.
+type Alignment struct {
+	Paragraphs [][]AlignedWord `json:"paragraphs"`
+	Stats      map[string]int  `json:"stats"` // words, eq, sub
 }
 
 // DiarizeParagraph is a paragraph of ai-trns's diarize job (?format=paragraphs) without its text and words: who

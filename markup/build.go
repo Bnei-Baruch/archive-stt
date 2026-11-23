@@ -273,28 +273,16 @@ type Span struct {
 // Align is the Span of every paragraph by its words' match to the heard ones; nil where nothing matched or the
 // match runs back in time (a repeated phrase matched elsewhere)
 func Align(paras []string, words []HeardWord) []*Span {
-	var ref []string
-	var refPara []int
-	for i, p := range paras {
-		for _, tok := range fields(markRE.ReplaceAllString(p, "")) {
-			if norm := Norm(tok); norm != "" {
-				ref = append(ref, norm)
-				refPara = append(refPara, i)
-			}
-		}
-	}
-	var heard []int
-	var hyp []string
+	toks := transcriptTokens(paras)
+	texts := make([]string, len(words))
 	for j, w := range words {
-		if norm := Norm(w.Word); norm != "" {
-			heard = append(heard, j)
-			hyp = append(hyp, norm)
-		}
+		texts[j] = w.Word
 	}
+	match, kind := tokenMatch(toks, texts)
 	matched := map[int][]int{}
-	for _, op := range WordOps(ref, hyp, FuzzyThreshold) {
-		if op.Kind == "eq" {
-			matched[refPara[op.I]] = append(matched[refPara[op.I]], heard[op.J])
+	for k, t := range toks {
+		if kind[k] == "eq" {
+			matched[t.P] = append(matched[t.P], match[k])
 		}
 	}
 	out := make([]*Span, len(paras))

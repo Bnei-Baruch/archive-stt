@@ -3,7 +3,7 @@ package markup
 // Word matching of a reference text against heard words: the part of ai-trns's textdiff.py the markup needs.
 // Both sides are normalized (niqqud, quotes, punctuation stripped); words at or above FuzzyThreshold character
 // similarity count as equal, so spelling variants (ktiv male / haser) still match. difflib is the Go port of
-// Python's, so the alignment is the same as ai-trns's.
+// Python's: WordOps is ai-trns's alignment; AnchoredOps (used here) pins unique words first.
 
 import (
 	"regexp"
@@ -143,6 +143,96 @@ func WordOps(ref, hyp []string, threshold float64) []Op {
 		}
 	}
 	return ops
+}
+
+// AnchoredOps aligns like WordOps, but first pins the words that occur once in both (within the span) and keep
+// their order -- the longest such chain -- and aligns the spans between them the same way; a span with no such
+// word goes to WordOps. difflib alone starts from the longest common block: a quote the Rav reads twice, matched
+// at its second reading, drags the whole text between to the wrong place. A repeated phrase is not unique, so it
+// cannot.
+func AnchoredOps(ref, hyp []string, threshold float64) []Op {
+	var ops []Op
+	var align func(a0, a1, b0, b1 int)
+	align = func(a0, a1, b0, b1 int) {
+		if a0 == a1 && b0 == b1 {
+			return
+		}
+		anchors := uniqueAnchors(ref[a0:a1], hyp[b0:b1])
+		if len(anchors) == 0 {
+			for _, op := range WordOps(ref[a0:a1], hyp[b0:b1], threshold) {
+				if op.I >= 0 {
+					op.I += a0
+				}
+				if op.J >= 0 {
+					op.J += b0
+				}
+				ops = append(ops, op)
+			}
+			return
+		}
+		pa, pb := a0, b0
+		for _, an := range anchors {
+			i, j := a0+an[0], b0+an[1]
+			align(pa, i, pb, j)
+			ops = append(ops, Op{"eq", i, j})
+			pa, pb = i+1, j+1
+		}
+		align(pa, a1, pb, b1)
+	}
+	align(0, len(ref), 0, len(hyp))
+	return ops
+}
+
+// uniqueAnchors are the pairs (i, j) of the words that occur once in a and once in b, the longest chain of them
+// increasing in both
+func uniqueAnchors(a, b []string) [][2]int {
+	ca := map[string]int{}
+	for _, w := range a {
+		ca[w]++
+	}
+	cb := map[string]int{}
+	pos := map[string]int{}
+	for j, w := range b {
+		cb[w]++
+		pos[w] = j
+	}
+	var pairs [][2]int // in order of i
+	for i, w := range a {
+		if ca[w] == 1 && cb[w] == 1 {
+			pairs = append(pairs, [2]int{i, pos[w]})
+		}
+	}
+	// the longest increasing subsequence by j (patience sorting)
+	var tails []int // tails[k]: index into pairs of the smallest last j of a chain of length k+1
+	prev := make([]int, len(pairs))
+	for k, p := range pairs {
+		lo, hi := 0, len(tails)
+		for lo < hi {
+			m := (lo + hi) / 2
+			if pairs[tails[m]][1] < p[1] {
+				lo = m + 1
+			} else {
+				hi = m
+			}
+		}
+		prev[k] = -1
+		if lo > 0 {
+			prev[k] = tails[lo-1]
+		}
+		if lo == len(tails) {
+			tails = append(tails, k)
+		} else {
+			tails[lo] = k
+		}
+	}
+	if len(tails) == 0 {
+		return nil
+	}
+	out := make([][2]int, len(tails))
+	for k, n := tails[len(tails)-1], len(tails)-1; k >= 0; k, n = prev[k], n-1 {
+		out[n] = pairs[k]
+	}
+	return out
 }
 
 // fields splits on whitespace, as Python's str.split()

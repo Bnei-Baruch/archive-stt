@@ -93,14 +93,17 @@ func (p *Pipeline) jobDone(id string) (*aitrns.Job, string, error) {
 }
 
 // BuildSegmentation is the automatic segmentation of a run's words and diarization and the lesson's transcript
-// (html: its doc2html; nil / "": none, built from the audio)
+// (html: its doc2html; nil / "": none, built from the audio), and the transcript's words on the run's (nil without
+// a transcript). The revision names the transcript even when it has no marks and the segmentation is the audio's:
+// its words are aligned all the same.
 func BuildSegmentation(run *models.Run, words *models.Words, d *models.Diarization, transcript *models.FileRef,
-	html string) *models.SegmentationData {
+	html string) (*models.SegmentationData, *models.Alignment) {
 	seg := markup.Build(d.Paragraphs, words.Words, html, markup.Duration(run.Data.Media, d.Paragraphs))
-	if seg.Source == common.SegFromTranscript {
-		seg.Transcript = transcript
+	if transcript == nil || html == "" {
+		return seg, nil
 	}
-	return seg
+	seg.Transcript = transcript
+	return seg, markup.AlignWords(markup.TranscriptParagraphs(html), words.Words)
 }
 
 // diarizeResult is a finished diarize job's words (?format=json) and paragraphs (?format=paragraphs); failure:
@@ -195,7 +198,12 @@ func (p *Pipeline) advance(run models.Run) (*models.Run, error) {
 		slog.Warn("no transcript, built from the audio", "uid", run.CuUID, "err", err)
 		transcript, html = nil, ""
 	}
-	seg := BuildSegmentation(&run, words, d, transcript, html)
+	seg, aligned := BuildSegmentation(&run, words, d, transcript, html)
+	if aligned != nil {
+		if err := p.Store.SaveAlignment(transcript.FileUID, run.ID, aligned); err != nil {
+			return failed(run, "saving the alignment: "+err.Error()), nil
+		}
+	}
 	if err := p.Store.AddSegmentation(&models.Segmentation{CuUID: run.CuUID, FileUID: run.FileUID,
 		WordsRunID: run.ID, Source: common.RevAuto, Author: run.Author, Data: *seg}); err != nil {
 		return failed(run, "saving the segmentation: "+err.Error()), nil
@@ -206,6 +214,9 @@ func (p *Pipeline) advance(run models.Run) (*models.Run, error) {
 	}
 	for k, v := range answer.Stats {
 		stats[k] = v
+	}
+	if aligned != nil {
+		stats["alignment"] = aligned.Stats
 	}
 	run.Status = common.StatusReady
 	run.Data.Finished = utils.Now()
@@ -393,11 +404,13 @@ type Rebuilt struct {
 	Source     string                 `json:"source"` // transcript | audio
 	Transcript *models.FileRef        `json:"transcript"`
 	Stats      map[string]interface{} `json:"stats"`
+	Alignment  map[string]int         `json:"alignment,omitempty"` // the transcript's words on the run's: words, eq, sub
 }
 
 // Rebuild writes a new segmentation revision `auto` from a run's kept words and diarization (runID; "": the
 // lesson's latest ready run that has them) and the lesson's transcript in kmedia now -- no ai-trns. Human
-// revisions stay current. A revision equal to the last `auto` of the same run is not written again.
+// revisions stay current. A revision equal to the last `auto` of the same run is not written again; the
+// transcript's alignment is written all the same (an older build may have none).
 func (p *Pipeline) Rebuild(uid, runID, author string) (*Rebuilt, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -424,7 +437,14 @@ func (p *Pipeline) Rebuild(uid, runID, author string) (*Rebuilt, error) {
 	if err != nil {
 		return nil, &RebuildError{502, err.Error()}
 	}
-	data := BuildSegmentation(run, words, d, transcript, html)
+	data, aligned := BuildSegmentation(run, words, d, transcript, html)
+	var alignStats map[string]int
+	if aligned != nil {
+		if err := p.Store.SaveAlignment(transcript.FileUID, run.ID, aligned); err != nil {
+			return nil, err
+		}
+		alignStats = aligned.Stats
+	}
 	seg, err := p.Store.LastAuto(uid, run.ID)
 	if err != nil {
 		return nil, err
@@ -446,7 +466,8 @@ func (p *Pipeline) Rebuild(uid, runID, author string) (*Rebuilt, error) {
 		return nil, err
 	}
 	return &Rebuilt{Rev: seg.Rev, Unchanged: unchanged, Current: current != nil && current.Rev == seg.Rev,
-		WordsRunID: run.ID, Source: data.Source, Transcript: data.Transcript, Stats: data.Stats}, nil
+		WordsRunID: run.ID, Source: data.Source, Transcript: data.Transcript, Stats: data.Stats,
+		Alignment: alignStats}, nil
 }
 
 // rebuildRun is the run to rebuild from: the given one (of this lesson, ready) or the latest ready one with a

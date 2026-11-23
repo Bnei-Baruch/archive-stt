@@ -5,6 +5,10 @@
 //	words/{file_uid}/{run_id}.json    the media file's words with their times ({"words": [{word, start, end}]}):
 //	                                  the immutable layer. The same file may be transcribed again by another
 //	                                  model -- a new run_id next to the old one.
+//	align/{transcript_file_uid}/{run_id}.json
+//	                                  the transcript's words on the run's words (models.Alignment): the time of
+//	                                  every word of the transcript, for search. Derived, written with every
+//	                                  segmentation built on that transcript and run.
 //
 // Words + diarization are the input of a rebuild of the automatic segmentation.
 //
@@ -80,6 +84,32 @@ func (s *Store) LoadWords(fileUID, runID string) (*models.Words, error) {
 		return nil, fmt.Errorf("words %s/%s: %w", fileUID, runID, err)
 	}
 	return w, nil
+}
+
+// alignment: the transcript's words on a run's
+
+func (s *Store) AlignmentPath(transcriptUID, runID string) string {
+	return s.Path("align", transcriptUID, runID+".json")
+}
+
+func (s *Store) SaveAlignment(transcriptUID, runID string, a *models.Alignment) error {
+	return utils.WriteJSON(s.AlignmentPath(transcriptUID, runID), a)
+}
+
+// LoadAlignment is the alignment, or nil if there is none
+func (s *Store) LoadAlignment(transcriptUID, runID string) (*models.Alignment, error) {
+	b, err := os.ReadFile(s.AlignmentPath(transcriptUID, runID))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a := new(models.Alignment)
+	if err := json.Unmarshal(b, a); err != nil {
+		return nil, fmt.Errorf("alignment %s/%s: %w", transcriptUID, runID, err)
+	}
+	return a, nil
 }
 
 // diarization: immutable, one per run

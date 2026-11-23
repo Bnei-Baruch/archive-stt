@@ -109,6 +109,7 @@ ai-trns (ai-tools :8766, GPU)          MDB (Postgres, только чтение)
 |---|---|
 | `archive-stt.db` | SQLite: `run` (запуски: файл, стадия, статус, задачи ai-trns), `diarization` (абзацы ai-trns запуска без текста: `speaker`, `label`, `reading`, `start`, `end`) и `segmentation` (ревизии абзацев и глав, без текста). Схема — `migrations/`, применяется при старте |
 | `words/<file_uid>/<run>.json` | слова медиафайла: `{"words": [{word, start, end}]}` — неизменяемый слой; со `diarization` — вход для пересборки |
+| `align/<transcript_file_uid>/<run>.json` | слова транскрипта на словах запуска: для каждого `<p>` `doc2html` — его слова (через пробелы) с временем (`{t, s, e, m}`, `m`: `eq` / `sub` / нет — время из промежутка); для поиска. Пишется при сборке и пересборке |
 
 ## Доступ
 
