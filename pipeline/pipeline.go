@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/Bnei-Baruch/archive-stt/kmedia"
 	"github.com/Bnei-Baruch/archive-stt/markup"
 	"github.com/Bnei-Baruch/archive-stt/models"
+	"github.com/Bnei-Baruch/archive-stt/search"
 	"github.com/Bnei-Baruch/archive-stt/store"
 	"github.com/Bnei-Baruch/archive-stt/subtitles"
 	"github.com/Bnei-Baruch/archive-stt/utils"
@@ -52,6 +54,7 @@ type Pipeline struct {
 	Kmedia    Kmedia
 	Subtitles Subtitles // nil: no MDB, the words always come from the STT
 	mu        sync.Mutex
+	indices   search.Cache // the transcripts' words for Locate, by transcript and run
 }
 
 // StartError is a run that could not start: Status is the HTTP status to answer with
@@ -531,15 +534,25 @@ func (p *Pipeline) Document(uid string, rev int) (*models.Document, error) {
 	return markup.Document(seg, run, words), nil
 }
 
-// Timecode is the time of every word of the transcript of the lesson's current revision, in language ("": the
-// run's); nil if there is no markup, no transcript, no alignment kept or the markup is in another language
-func (p *Pipeline) Timecode(uid, language string) (*models.Timecode, error) {
+// current is the lesson's current revision and its run, if it is on a transcript and in language ("": the
+// run's); nils if not
+func (p *Pipeline) current(uid, language string) (*models.Segmentation, *models.Run, error) {
 	seg, err := p.Store.Segmentation(uid, 0)
 	if err != nil || seg == nil || seg.Data.Transcript == nil {
-		return nil, err
+		return nil, nil, err
 	}
 	run, err := p.Store.GetRun(seg.WordsRunID)
 	if err != nil || run == nil || (language != "" && language != run.Language) {
+		return nil, nil, err
+	}
+	return seg, run, nil
+}
+
+// Timecode is the time of every word of the transcript of the lesson's current revision, in language ("": the
+// run's); nil if there is no markup, no transcript, no alignment kept or the markup is in another language
+func (p *Pipeline) Timecode(uid, language string) (*models.Timecode, error) {
+	seg, run, err := p.current(uid, language)
+	if err != nil || seg == nil {
 		return nil, err
 	}
 	a, err := p.Store.LoadAlignment(seg.Data.Transcript.FileUID, run.ID)
@@ -555,4 +568,58 @@ func (p *Pipeline) Timecode(uid, language string) (*models.Timecode, error) {
 		}
 	}
 	return out, nil
+}
+
+// Locate finds fragments of the transcript of the lesson's current revision, in language ("": the run's): each
+// query is "<first words>|<last words>|<number of words>", the last two optional (the number: about, it picks
+// among several places). nil if there is no markup
+// on a transcript (in that language) or no alignment kept.
+func (p *Pipeline) Locate(uid, language string, queries []string) (*models.Located, error) {
+	seg, run, err := p.current(uid, language)
+	if err != nil || seg == nil {
+		return nil, err
+	}
+	t := seg.Data.Transcript.FileUID
+	ix, err := p.indices.Get(t+"/"+run.ID, func() (*search.Index, error) {
+		a, err := p.Store.LoadAlignment(t, run.ID)
+		if err != nil || a == nil {
+			return nil, err
+		}
+		return search.NewIndex(a), nil
+	})
+	if err != nil || ix == nil {
+		return nil, err
+	}
+	out := &models.Located{UID: uid, Language: run.Language, Transcript: *seg.Data.Transcript, RunID: run.ID,
+		Rev: seg.Rev, Results: make([]models.Fragment, len(queries))}
+	for k, q := range queries {
+		parts := strings.SplitN(q, "|", 3)
+		var last string
+		n := 0
+		if len(parts) > 1 {
+			last = parts[1]
+		}
+		if len(parts) > 2 {
+			n, _ = strconv.Atoi(strings.TrimSpace(parts[2])) // not a number: unknown
+		}
+		r := models.Fragment{Q: q}
+		if from, to, found := ix.Locate(search.Words(parts[0]), search.Words(last), n); found != "" {
+			a, b := ix.Pos(from), ix.Pos(to)
+			r.Found, r.Start, r.End, r.P, r.W = found, &a.Start, &b.End, &a.P, &a.W
+			r.Chapter = chapterAt(seg.Data.Chapters, a.Start)
+		}
+		out.Results[k] = r
+	}
+	return out, nil
+}
+
+// chapterAt is the chapter at t (a chapter lasts until the next starts), or nil
+func chapterAt(chs []models.Chapter, t float64) *models.Chapter {
+	for k := len(chs) - 1; k >= 0; k-- {
+		if chs[k].Start <= t {
+			c := chs[k]
+			return &c
+		}
+	}
+	return nil
 }

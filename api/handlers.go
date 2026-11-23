@@ -156,6 +156,45 @@ func (h *Handlers) GetTimecode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tc)
 }
 
+// MaxQueries: fragments asked in one GET /cus/{uid}/locate
+const MaxQueries = 20
+
+// GetLocate: GET /cus/{uid}/locate?q=<first words>|<last words>|<number of words>&q=...&lang= -> where and when
+// each fragment of the transcript is (results in the order asked); 404 as /timecode
+func (h *Handlers) GetLocate(w http.ResponseWriter, r *http.Request) {
+	uid, ok := uidParam(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	lang := q.Get("lang")
+	if lang != "" && !common.IsLanguage(lang) {
+		fail(w, http.StatusBadRequest, "lang: one of "+strings.Join(common.Languages, ", "))
+		return
+	}
+	queries := q["q"]
+	if len(queries) == 0 || len(queries) > MaxQueries {
+		fail(w, http.StatusBadRequest, "q: 1 to "+strconv.Itoa(MaxQueries)+
+			" fragments, <first words>|<last words>|<number of words>")
+		return
+	}
+	if _, err := h.Pipeline.Sync(uid); err != nil {
+		internal(w, r, err)
+		return
+	}
+	out, err := h.Pipeline.Locate(uid, lang, queries)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, public)
+	if out == nil {
+		fail(w, http.StatusNotFound, "no timecode for this lesson: no markup on a transcript (in this language)")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // GetRuns: GET /cus/{uid}/runs -> the lesson's runs, newest first
 func (h *Handlers) GetRuns(w http.ResponseWriter, r *http.Request) {
 	uid, ok := uidParam(w, r)

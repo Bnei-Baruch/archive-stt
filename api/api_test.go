@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -627,4 +628,46 @@ func TestTimecodeGivesEveryWordOfTheTranscriptItsTime(t *testing.T) {
 	e.km.unit.Files = e.km.unit.Files[:2]
 	e.do("POST", "/cus/Unit0001/rebuild", nil)
 	check(t, e.do("GET", "/cus/Unit0001/timecode", nil).Code, 404)
+}
+
+type located struct {
+	UID     string `json:"uid"`
+	Rev     int    `json:"rev"`
+	Results []struct {
+		Q       string          `json:"q"`
+		Found   string          `json:"found"`
+		Start   *float64        `json:"start"`
+		End     *float64        `json:"end"`
+		P       *int            `json:"p"`
+		W       *int            `json:"w"`
+		Chapter *models.Chapter `json:"chapter"`
+	} `json:"results"`
+}
+
+func TestLocateFindsFragmentsByTheirFirstAndLastWords(t *testing.T) {
+	e := newEnv(t)
+	check(t, e.do("GET", "/cus/Unit0001/locate?q=x", nil).Code, 404)
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.finish()
+	check(t, e.do("GET", "/cus/Unit0001/locate", nil).Code, 400)
+	q := url.Values{}
+	q.Add("q", "כל ישראל יש להם|לעולם הבא|7")   // paras[5], 7 words
+	q.Add("q", "זו המערכת של הבורא")            // paras[9], no end
+	q.Add("q", "שום דבר כזה|לא קיים בטקסט הזה") // not there
+	out := new(located)
+	rec := e.do("GET", "/cus/Unit0001/locate?"+q.Encode(), out)
+	check(t, rec.Code, 200)
+	check(t, rec.Header().Get("Cache-Control"), "public, max-age=300")
+	check(t, len(out.Results), 3)
+	r := out.Results[0]
+	check(t, []interface{}{r.Q, r.Found, *r.P, *r.W, r.Chapter.Type}, []interface{}{q["q"][0], "exact", 5, 0, "reading"})
+	if *r.End <= *r.Start {
+		t.Fatalf("span %v-%v", *r.Start, *r.End)
+	}
+	r = out.Results[1]
+	check(t, []interface{}{r.Found, *r.P, r.Chapter.Type}, []interface{}{"exact", 9, "qa"})
+	r = out.Results[2]
+	check(t, []interface{}{r.Found, r.Start, r.P, r.Chapter}, []interface{}{"", (*float64)(nil), (*int)(nil), (*models.Chapter)(nil)})
+	many := strings.Repeat("q=x&", MaxQueries+1)
+	check(t, e.do("GET", "/cus/Unit0001/locate?"+many, nil).Code, 400)
 }

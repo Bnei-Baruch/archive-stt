@@ -7,6 +7,10 @@
 //	GET  /cus/{uid}/timecode?lang=                 the time of every word of the transcript: paragraphs[p][w] --
 //	                                               the w-th word (by whitespace) of the p-th <p> of its doc2html;
 //	                                               public; 404 without markup on a transcript
+//	GET  /cus/{uid}/locate?q=&lang=                fragments of the transcript (a search engine's highlights)
+//	                                               by their first and last words and length: q=<first>|<last>|<n>,
+//	                                               the last two optional, up to 20;
+//	                                               where (p, w), when (start, end), the chapter; public
 //	GET  /cus/{uid}/runs                           the lesson's runs, newest first, public
 //	GET  /cus/{uid}/runs/latest | /runs/{id}       one run, public
 //	GET  /health
@@ -22,6 +26,7 @@ func Handler(h *Handlers) http.Handler {
 	mux.HandleFunc("GET /cus/{uid}/markup", h.GetMarkup)
 	mux.HandleFunc("POST /cus/{uid}/rebuild", h.Rebuild)
 	mux.HandleFunc("GET /cus/{uid}/timecode", h.GetTimecode)
+	mux.HandleFunc("GET /cus/{uid}/locate", h.GetLocate)
 	mux.HandleFunc("GET /cus/{uid}/runs", h.GetRuns)
 	mux.HandleFunc("GET /cus/{uid}/runs/{id}", h.GetRun)
 	return recoverAndLog(cors(mux))

@@ -134,6 +134,29 @@ type Timecode struct {
 	Paragraphs [][]float64 `json:"paragraphs"`
 }
 
+// Located is the fragments of the lesson's transcript found (GET /cus/{uid}/locate), in the order asked
+type Located struct {
+	UID        string     `json:"uid"`
+	Language   string     `json:"language"`
+	Transcript FileRef    `json:"transcript"`
+	RunID      string     `json:"run_id"`
+	Rev        int        `json:"rev"`
+	Results    []Fragment `json:"results"`
+}
+
+// Fragment is a fragment found: Found exact | fuzzy | "" (not found: the rest null); Start / End its time on the
+// media, P / W its first word (the <p> of the transcript's doc2html and the place there, as the timecode),
+// Chapter the chapter at its start
+type Fragment struct {
+	Q       string   `json:"q"`
+	Found   string   `json:"found"`
+	Start   *float64 `json:"start"`
+	End     *float64 `json:"end"`
+	P       *int     `json:"p"`
+	W       *int     `json:"w"`
+	Chapter *Chapter `json:"chapter"`
+}
+
 // DiarizeParagraph is a paragraph of ai-trns's diarize job (?format=paragraphs) without its text and words: who
 // speaks (Speaker: "Rav", "Reader", SPEAKER_NN; Label: its display name), whether the source is read, when. A
 // paragraph's words are those of the run's words between its start and the next one's.
