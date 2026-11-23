@@ -255,6 +255,12 @@ func (s *Store) AddSegmentation(g *models.Segmentation) error {
 	return tx.Commit()
 }
 
+// LastAuto is the lesson's last revision auto built on the run, or nil
+func (s *Store) LastAuto(cuUID, runID string) (*models.Segmentation, error) {
+	return scanSegmentation(s.DB.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? AND "+
+		"words_run_id = ? AND source = 'auto' ORDER BY rev DESC LIMIT 1", cuUID, runID))
+}
+
 // Segmentation is the given revision (rev > 0) or the current one: the last human / migrated if any, else the
 // last auto; nil if none
 func (s *Store) Segmentation(cuUID string, rev int) (*models.Segmentation, error) {

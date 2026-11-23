@@ -13,12 +13,12 @@ Go, один статический бинарник; данные — SQLite и
         │ POST /cus/{uid}/markup                                        │ GET (https)
         ▼                                                          ▼
 archive-stt  (ai-tools :8770)  ◀──── только GET ──── Angie: https://ai-tools.kab.info/archive-stt/
-   │  1. kmedia: файлы урока (аудио, транскрипт)
-   │  2. ai-trns POST /jobs            → слова (SRT)
+   │  1. kmedia: файлы урока (аудио, транскрипт); MDB: выверенные субтитры (VTT до 2027)
+   │  2. ai-trns POST /jobs            → слова (SRT)          — пропускается, если есть VTT: SRT из него
    │  3. ai-trns POST /diarize/words   → слова со временем (?format=json) + абзацы: спикер, reading (?format=paragraphs)
    │  4. сборка разметки (markup/), запись в ARCHIVE_STT_DATA_DIR
    ▼
-ai-trns (ai-tools :8766, GPU)
+ai-trns (ai-tools :8766, GPU)          MDB (Postgres, только чтение)
 ```
 
 - **ai-trns** (GPU, только по HTTP): слова с таймкодами и спикеры. Больше ничего оттуда не берётся.
@@ -26,6 +26,11 @@ ai-trns (ai-tools :8766, GPU)
   в двух форматах: `?format=json` — слова, время каждого выровнено по аудио (CTC); `?format=paragraphs` — абзацы
   со спикером (`Rav` / `Reader` / `SPEAKER_NN`, подпись `הרב / קריין / תלמיד`) и флагом `reading`; источники
   урока ai-trns находит сам по `uid`.
+- **Слова из VTT.** Если у урока в MDB есть субтитры (`insert_type = subtitles`) на языке аудио, созданные до
+  2027 года (выверены людьми, на них дообучают модель), — слова берутся из них: VTT → SRT → сразу
+  `/diarize/words`, без `/jobs`; запуск `words_source = vtt`, `vtt_file_uid`. Время каждого слова всё равно
+  выравнивается по аудио. В части VTT иврит сохранён в визуальном порядке (`.שלום`): ведущая `.,!?:;` переносится
+  в конец строки. Без `mdb.url` VTT не ищется. Ошибка MDB или CDN → `502`, пустой VTT → STT.
 - **archive-stt** (здесь): файлы урока из kmedia, цепочка задач, сборка разметки, хранение и отдача.
   Ответ ai-trns сохраняется сразу — слова (`words/`) и диаризация (таблица `diarization`: абзацы
   `?format=paragraphs` без текста и слов): там задачи удаляются через несколько дней, а разметку можно
@@ -33,12 +38,16 @@ ai-trns (ai-tools :8766, GPU)
   транскрипта получает его из слов при отдаче.
 - Аудио — оригинальная запись урока (файл с `_o_` в имени); её язык — язык урока, если `language` не задан.
   Транскрипт — текстовый файл kmedia на том же языке (`tamlil` или без типа, не PDF), через archive-unzip `doc2html`.
+  Берётся при сборке (конец запуска, rebuild), а не при старте — самый новый; его файл записывается в ревизию
+  (`segmentation.data.transcript`), документ называет его. Не получен в конце запуска — ревизия по аудио, запуск
+  не падает (потом — rebuild); не получен при rebuild — `502`.
 - Запуск движется опросом: при каждом чтении и фоновым циклом раз в `server.tick` (10 с).
   Недоступность ai-trns не валит запуск — следующая попытка на следующем тике. Один запуск на урок одновременно.
 
 | Код | |
 |---|---|
 | `main.go`, `cmd/` | команды (cobra) и настройки (viper): `server`, `config`, `health`, `version` |
+| `mdb/`, `subtitles/` | MDB (только чтение): выверенные VTT урока; VTT → SRT |
 | `api/` | HTTP API (`net/http`), права на запуск, CORS |
 | `pipeline/` | запуск: kmedia → задача слов → задача спикеров → сборка → запись |
 | `markup/` | разметка из абзацев ai-trns и (если есть) размеченного транскрипта; выравнивание (`textdiff.go`); документ |
@@ -82,6 +91,7 @@ ai-trns (ai-tools :8766, GPU)
 | | | |
 |---|---|---|
 | `POST` | `/cus/{uid}/markup?language=&force=false` | запуск, `202` + запуск. `language` — по умолчанию язык оригинала. С `ARCHIVE_STT_API_KEYS` нужен `X-API-Key`, без них — только с самого сервера (`127.0.0.1`), иначе `403` |
+| `POST` | `/cus/{uid}/rebuild?run=` | новая ревизия `auto` из сохранённых слов и диаризации запуска (`run`; по умолчанию последний готовый, у которого они есть) и транскрипта kmedia **сейчас**, без ai-trns. `201`; `200` и `unchanged: true` — то же, что последняя `auto` этого запуска, ревизия не пишется. Ответ: `rev`, `current` (ручная ревизия остаётся текущей), `source`, `transcript`, `stats`. `404` нет готового запуска, `409` у запуска нет слов / диаризации или он не готов, `502` kmedia или транскрипт не получен (из аудио молча не пересобирается). Доступ — как у запуска |
 | `GET` | `/cus/{uid}/markup?rev=` | документ разметки, публично (CORS `*`, кэш 5 мин); `404`, пока нет готового запуска |
 | `GET` | `/cus/{uid}/runs` | запуски урока, новые первыми |
 | `GET` | `/cus/{uid}/runs/latest`, `/cus/{uid}/runs/{id}` | запуск: `kind`, `file_uid`, `words_source`, `status` `pending` (`stage`: `words` → `speakers`) → `ready` / `failed` (`error`), задачи ai-trns |
@@ -126,6 +136,7 @@ ai-trns (ai-tools :8766, GPU)
 | `kmedia.url` | `https://kabbalahmedia.info` | |
 | `kmedia.cdn-url` | `https://cdn.kabbalahmedia.info` | аудио для ai-trns (хост должен быть в его `AI_TRNS_ALLOWED_URL_HOSTS`) |
 | `kmedia.timeout` | `30s` | |
+| `mdb.url` | пусто | MDB только для чтения (`postgres://…`): выверенные субтитры урока; пусто — слова только из STT |
 | `data.dir` | `./data` | хранилище |
 
 ## Локальный запуск
@@ -215,7 +226,19 @@ go build -o archive-stt .
 2. Сервер: разметка уже готова → в `markup-ok.txt`, не запускается; запуск уже идёт → ждём его.
 3. Ответ на запуск: `404` (нет такого юнита в kmedia), `422` (нет аудио), прочее → в `markup-failed.txt`.
 
-`--force` отключает 1 и 2 и запускает заново.
+`--force` отключает 1 и 2 и запускает заново. `--redo-stt` — запустить заново готовые уроки, у которых слова из STT
+(готовые по VTT пропускаются, список ok не пропускает): сервер возьмёт VTT, если он есть. Давать ему уроки с VTT:
+```sql
+SELECT DISTINCT cu.uid FROM files f JOIN content_units cu ON cu.id = f.content_unit_id
+WHERE f.properties->>'insert_type' = 'subtitles' AND f.language = 'he'
+  AND f.published AND f.secure = 0 AND f.removed_at IS NULL AND f.created_at < '2027-01-01';
+```
+
+**Пересборка** (`--rebuild`): без запусков и GPU, `POST /cus/{uid}/rebuild` по каждому уроку — после смены
+алгоритма сборки или транскрипта в kmedia. Списки — `rebuild-ok.txt` / `rebuild-failed.txt`.
+```bash
+./archive-stt markup --rebuild markup-ok.txt      # все готовые
+```
 
 **Списки** (в текущей папке, не в git): `markup-ok.txt` — прошедшие, uid в строке, дописывается;
 `markup-failed.txt` — упавшие, `uid<TAB>ошибка`, uid уходит оттуда, когда позже проходит. В конце — прошедшие и
@@ -231,8 +254,10 @@ go build -o archive-stt .
 | `--parallel 1` | одновременно на сервере (GPU общий с ai-trns и live-трансляцией) |
 | `--poll 20s` | между проверками статуса |
 | `--dry-run`, `--force` | только показать / заново, даже если готово |
+| `--redo-stt` | заново готовые по STT (сервер возьмёт VTT) |
+| `--rebuild` | пересобрать из сохранённых слов, без запусков |
 | `--ssh`, `--port 8771` | туннель |
 | `--no-ssh`, `--url` | без туннеля |
-| `--ok`, `--failed` | другие файлы списков |
+| `--ok`, `--failed` | другие файлы списков (по умолчанию `markup-*.txt`, с `--rebuild` — `rebuild-*.txt`) |
 
 Список юнитов из MDB — пока скрипт `local/mdb_units.py` (не в git, описание — `local/README.md`).

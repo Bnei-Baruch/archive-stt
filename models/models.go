@@ -23,7 +23,6 @@ type RunData struct {
 	AudioURL         string                 `json:"audio_url,omitempty"`
 	OriginalLanguage string                 `json:"original_language,omitempty"`
 	Media            Media                  `json:"media"`
-	Transcript       *FileRef               `json:"transcript"`
 	Finished         string                 `json:"finished,omitempty"`
 	Stats            map[string]interface{} `json:"stats,omitempty"`
 }
@@ -70,7 +69,8 @@ type Chapter struct {
 
 // SegmentationData is the content of a segmentation revision
 type SegmentationData struct {
-	Source     string                 `json:"source"` // transcript | audio
+	Source     string                 `json:"source"`               // transcript | audio
+	Transcript *FileRef               `json:"transcript,omitempty"` // the kmedia transcript it is built on
 	Paragraphs []Paragraph            `json:"paragraphs"`
 	Chapters   []Chapter              `json:"chapters"`
 	Stats      map[string]interface{} `json:"stats"`

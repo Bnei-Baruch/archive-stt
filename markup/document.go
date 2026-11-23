@@ -31,7 +31,7 @@ func Document(seg *models.Segmentation, run *models.Run, words *models.Words) *m
 	}
 	var transcript *models.FileRef
 	if seg.Data.Source == common.SegFromTranscript {
-		transcript = run.Data.Transcript
+		transcript = seg.Data.Transcript
 	}
 	stats := seg.Data.Stats
 	if stats == nil {

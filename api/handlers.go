@@ -63,6 +63,34 @@ func (h *Handlers) StartMarkup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, run)
 }
 
+// Rebuild: POST /cus/{uid}/rebuild?run= -> 201 + what was built (200 if the same as before: no new revision)
+func (h *Handlers) Rebuild(w http.ResponseWriter, r *http.Request) {
+	author, ok := h.mayStart(w, r)
+	if !ok {
+		return
+	}
+	uid, ok := uidParam(w, r)
+	if !ok {
+		return
+	}
+	out, err := h.Pipeline.Rebuild(uid, r.URL.Query().Get("run"), author)
+	var se *pipeline.StartError
+	if errors.As(err, &se) {
+		fail(w, se.Status, se.Msg)
+		return
+	}
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, fresh)
+	status := http.StatusCreated
+	if out.Unchanged {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, out)
+}
+
 // GetMarkup: GET /cus/{uid}/markup?rev= -> the markup document; 404 until a run is ready
 func (h *Handlers) GetMarkup(w http.ResponseWriter, r *http.Request) {
 	uid, ok := uidParam(w, r)

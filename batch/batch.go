@@ -2,7 +2,10 @@
 // them and keeps two lists: the lessons marked up (ok) and those that failed, with the error.
 //
 // Before a start the server is asked about the lesson: ready -> listed as ok, not run again; pending -> waited
-// for. A lesson in the ok list is not even asked about. Force runs them all again.
+// for. A lesson in the ok list is not even asked about. Force runs them all again; RedoSTT runs again those whose
+// ready markup has its words from the STT (the server takes checked subtitles where the lesson has them).
+// Rebuild: no runs -- each lesson's segmentation is rebuilt on the server from its kept words (no ai-trns), one
+// request per lesson.
 package batch
 
 import (
@@ -25,6 +28,8 @@ type Runner struct {
 	StatusBase string // where they are watched (the same, or the public proxy for a dry run)
 	Language   string // "" -- the lesson's original language
 	Force      bool
+	RedoSTT    bool // a ready lesson whose words are from the STT is run again
+	Rebuild    bool // POST /cus/{uid}/rebuild instead of a run
 	Parallel   int
 	Poll       time.Duration
 	DryRun     bool
@@ -51,11 +56,16 @@ type netErr struct{ err error }
 
 func (e *netErr) Error() string { return e.err.Error() }
 
+// run is the server's answer: a run, an error (detail) or a rebuild (rev, unchanged, current)
 type run struct {
-	Status string  `json:"status"`
-	Stage  string  `json:"stage"`
-	Error  *string `json:"error"`
-	Detail string  `json:"detail"`
+	Status      string  `json:"status"`
+	Stage       string  `json:"stage"`
+	WordsSource string  `json:"words_source"`
+	Error       *string `json:"error"`
+	Detail      string  `json:"detail"`
+	Rev         int     `json:"rev"`
+	Unchanged   bool    `json:"unchanged"`
+	Current     bool    `json:"current"`
 }
 
 func (r *Runner) logf(format string, a ...interface{}) {
@@ -264,7 +274,7 @@ func (r *Runner) Prepare(uids []string) ([]string, error) {
 	r.running = map[string]time.Time{}
 	var todo []string
 	for _, uid := range uids {
-		if r.ok[uid] && !r.Force {
+		if r.ok[uid] && !r.Force && !r.RedoSTT {
 			r.Skipped = append(r.Skipped, uid)
 		} else {
 			todo = append(todo, uid)
@@ -282,18 +292,49 @@ func (r *Runner) startURL(uid string) string {
 	return r.Base + "/cus/" + uid + "/markup?" + q.Encode()
 }
 
+// rebuildNext rebuilds the next lesson's segmentation; a network error leaves it in todo
+func (r *Runner) rebuildNext(todo []string) ([]string, error) {
+	uid := todo[0]
+	if r.DryRun {
+		r.logf("%s: would rebuild", uid)
+		return todo[1:], nil
+	}
+	code, out, err := r.call(http.MethodPost, r.Base+"/cus/"+uid+"/rebuild")
+	if err != nil {
+		return todo, err
+	}
+	todo = todo[1:]
+	switch {
+	case code == http.StatusOK || code == http.StatusCreated:
+		note := fmt.Sprintf("rev %d", out.Rev)
+		if out.Unchanged {
+			note += " unchanged"
+		}
+		if !out.Current {
+			note += ", not current (a human revision is)"
+		}
+		return todo, r.markOK(uid, note)
+	default: // 404 no ready run, 409 its words or diarization not kept, 502 kmedia
+		return todo, r.markFailed(uid, fmt.Sprintf("%d %s", code, out.Detail))
+	}
+}
+
 // startNext checks the next lesson and starts it; a network error leaves it in todo
 func (r *Runner) startNext(todo []string) ([]string, error) {
+	if r.Rebuild {
+		return r.rebuildNext(todo)
+	}
 	uid := todo[0]
 	code, latest, err := r.call(http.MethodGet, r.StatusBase+"/cus/"+uid+"/runs/latest")
 	if err != nil {
 		return todo, err
 	}
 	todo = todo[1:]
-	if code == http.StatusOK && !r.Force {
+	redo := r.RedoSTT && latest.WordsSource == "stt"
+	if code == http.StatusOK && !r.Force && !(redo && latest.Status == "ready") {
 		switch latest.Status {
 		case "ready":
-			return todo, r.markOK(uid, "ready on the server already")
+			return todo, r.markOK(uid, "ready on the server already ("+latest.WordsSource+")")
 		case "pending":
 			r.logf("%s: pending already (%s), waiting", uid, latest.Stage)
 			r.wait(uid)
@@ -328,7 +369,7 @@ func (r *Runner) check() error {
 		}
 		switch latest.Status {
 		case "ready":
-			if err := r.markOK(uid, ""); err != nil {
+			if err := r.markOK(uid, latest.WordsSource); err != nil {
 				return err
 			}
 		case "failed":

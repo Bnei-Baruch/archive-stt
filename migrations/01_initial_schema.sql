@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS run (
     vtt_file_uid  TEXT,
     error         TEXT,
     jobs          TEXT NOT NULL DEFAULT '{}',   -- ai-trns jobs {words, speakers}
-    data          TEXT NOT NULL DEFAULT '{}',   -- audio_url, original_language, media, transcript, finished, stats
+    data          TEXT NOT NULL DEFAULT '{}',   -- audio_url, original_language, media, finished, stats
     author        TEXT,
     created       TEXT NOT NULL,
     updated       TEXT NOT NULL

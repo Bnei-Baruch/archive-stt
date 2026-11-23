@@ -8,7 +8,7 @@ name: CI/CD
 # SSH goes through a jump host, as for ai-trns -- secrets DEPLOY_HOST, DEPLOY_JUMP_HOST, DEPLOY_KNOWN_HOSTS,
 # DEPLOY_SSH_KEY (the same values as ai-trns's).
 # Settings: secrets ARCHIVE_STT_AI_TRNS_URL, ARCHIVE_STT_AI_TRNS_KEY, ARCHIVE_STT_API_KEYS (name:key,...; empty =
-# from the host itself); variables ARCHIVE_STT_DATA_DIR, ARCHIVE_STT_KMEDIA_URL, ARCHIVE_STT_CDN_URL,
+# from the host itself), ARCHIVE_STT_MDB_URL (read only; empty = words from the STT only); variables ARCHIVE_STT_DATA_DIR, ARCHIVE_STT_KMEDIA_URL, ARCHIVE_STT_CDN_URL,
 # ARCHIVE_STT_PORT.
 on:
   push:
@@ -73,6 +73,7 @@ jobs:
           AI_TRNS_URL: ${{ secrets.ARCHIVE_STT_AI_TRNS_URL }}
           AI_TRNS_KEY: ${{ secrets.ARCHIVE_STT_AI_TRNS_KEY }}
           API_KEYS: ${{ secrets.ARCHIVE_STT_API_KEYS }}
+          MDB_URL: ${{ secrets.ARCHIVE_STT_MDB_URL }}
           KMEDIA_URL: ${{ vars.ARCHIVE_STT_KMEDIA_URL }}
           CDN_URL: ${{ vars.ARCHIVE_STT_CDN_URL }}
         run: |
@@ -81,6 +82,7 @@ jobs:
             "ARCHIVE_STT_AI_TRNS_URL=$AI_TRNS_URL" "ARCHIVE_STT_AI_TRNS_KEY=$AI_TRNS_KEY" \
             "ARCHIVE_STT_SERVER_API_KEYS=$API_KEYS" "ARCHIVE_STT_SERVER_BIND_ADDRESS=:$PORT" \
             "ARCHIVE_STT_DATA_DIR=$DATA_DIR" "ARCHIVE_STT_KMEDIA_URL=$KMEDIA_URL" "ARCHIVE_STT_KMEDIA_CDN_URL=$CDN_URL" \
+            "ARCHIVE_STT_MDB_URL=$MDB_URL" \
             | ssh "$HOST" "umask 077 && cat > $HOME_DIR/archive-stt.env && chown archive-stt: $HOME_DIR/archive-stt.env"
 
       - uses: actions/setup-go@v6

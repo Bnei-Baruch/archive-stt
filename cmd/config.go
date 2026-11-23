@@ -26,6 +26,9 @@ url="https://kabbalahmedia.info"
 cdn-url="https://cdn.kabbalahmedia.info"   # the audio for ai-trns (the host must be in its AI_TRNS_ALLOWED_URL_HOSTS)
 timeout="30s"
 
+[mdb]
+url=""               # MDB, read only (postgres://...): a lesson's checked subtitles; empty = words from the STT only
+
 [data]
 dir="./data"         # SQLite and the words files; nothing is removed
 

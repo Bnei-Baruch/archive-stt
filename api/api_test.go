@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -126,7 +127,12 @@ func (f *fakeAiTrns) Result(id, format string) ([]byte, error) {
 	return nil, &aitrns.Error{}
 }
 
-type fakeKmedia struct{ unit *kmedia.Unit }
+type fakeKmedia struct {
+	unit       *kmedia.Unit
+	noDoc      bool              // the transcript cannot be had
+	transcript string            // its HTML ("": that of paras)
+	files      map[string]string // the CDN
+}
 
 func (k *fakeKmedia) FetchUnit(uid string) (*kmedia.Unit, error) {
 	if uid != "Unit0001" {
@@ -136,7 +142,30 @@ func (k *fakeKmedia) FetchUnit(uid string) (*kmedia.Unit, error) {
 }
 
 func (k *fakeKmedia) FetchTranscriptHTML(string) (string, error) {
+	if k.noDoc {
+		return "", errors.New("doc2html: 500")
+	}
+	if k.transcript != "" {
+		return k.transcript, nil
+	}
 	return "<p>" + strings.Join(paras, "</p><p>") + "</p>", nil
+}
+
+func (k *fakeKmedia) FetchFile(id string) ([]byte, error) {
+	if b, ok := k.files[id]; ok {
+		return []byte(b), nil
+	}
+	return nil, errors.New("cdn: 404")
+}
+
+// fakeMDB: the lessons' checked subtitles by uid/language
+type fakeMDB map[string]string
+
+func (m fakeMDB) VTT(uid, language string) (string, error) {
+	if uid == "Broken01" {
+		return "", errors.New("connection refused")
+	}
+	return m[uid+"/"+language], nil
 }
 
 func (k *fakeKmedia) AudioURL(id string) string { return "https://cdn.kabbalahmedia.info/" + id }
@@ -157,6 +186,7 @@ type env struct {
 	handler http.Handler
 	ai      *fakeAiTrns
 	km      *fakeKmedia
+	mdb     fakeMDB
 }
 
 func newEnv(t *testing.T) *env {
@@ -166,10 +196,11 @@ func newEnv(t *testing.T) *env {
 	}
 	t.Cleanup(func() { s.Close() })
 	ai := &fakeAiTrns{jobs: map[string]*aitrns.Job{}}
-	km := &fakeKmedia{unit: unit()}
-	p := &pipeline.Pipeline{Store: s, AiTrns: ai, Kmedia: km}
+	km := &fakeKmedia{unit: unit(), files: map[string]string{}}
+	m := fakeMDB{}
+	p := &pipeline.Pipeline{Store: s, AiTrns: ai, Kmedia: km, Subtitles: m}
 	h := &Handlers{Pipeline: p}
-	return &env{t: t, p: p, h: h, handler: Handler(h), ai: ai, km: km}
+	return &env{t: t, p: p, h: h, handler: Handler(h), ai: ai, km: km, mdb: m}
 }
 
 // do sends a request from addr (default: this host) and decodes the answer into out
@@ -211,9 +242,8 @@ func TestTheChainWordsThenSpeakersThenMarkup(t *testing.T) {
 	run := new(models.Run)
 	rec := e.do("POST", "/cus/Unit0001/markup", run)
 	check(t, rec.Code, 202)
-	check(t, []interface{}{run.Status, run.Stage, run.Kind, run.FileUID, run.Language, run.WordsSource,
-		*run.Data.Transcript, *run.Author},
-		[]interface{}{"pending", "words", "first", "AudioOr1", "he", "stt", models.FileRef{FileUID: "TextDoc1"}, "local"})
+	check(t, []interface{}{run.Status, run.Stage, run.Kind, run.FileUID, run.Language, run.WordsSource, *run.Author},
+		[]interface{}{"pending", "words", "first", "AudioOr1", "he", "stt", "local"})
 	check(t, e.ai.calls, [][]string{{"words", "https://cdn.kabbalahmedia.info/AudioOr1", "he"}})
 	// a second start while it runs is the same run
 	again := new(models.Run)
@@ -246,6 +276,7 @@ func TestTheChainWordsThenSpeakersThenMarkup(t *testing.T) {
 	check(t, rec.Header().Get("Cache-Control"), "public, max-age=300")
 	check(t, []interface{}{doc.Version, doc.OriginalLanguage, doc.Language, doc.Media.FileUID},
 		[]interface{}{2, "he", "he", "AudioOr1"})
+	check(t, doc.Transcript, &models.FileRef{FileUID: "TextDoc1"})
 	check(t, doc.Run, models.DocumentRun{ID: run.ID, Created: run.Created, WordsSource: "stt", Source: "transcript"})
 	check(t, []interface{}{doc.Segmentation.Rev, doc.Segmentation.Source}, []interface{}{1, "auto"})
 	var types []string
@@ -273,11 +304,8 @@ func TestTheChainWordsThenSpeakersThenMarkup(t *testing.T) {
 	if err != nil || d == nil || len(d.Paragraphs) == 0 {
 		t.Fatalf("diarization: %v", err)
 	}
-	rebuilt := e.p.BuildSegmentation(run, words, d)
 	seg, _ := e.p.Store.Segmentation("Unit0001", 1)
-	a, _ := json.Marshal(rebuilt)
-	b, _ := json.Marshal(seg.Data)
-	check(t, string(a), string(b))
+	check(t, seg.Data.Transcript, &models.FileRef{FileUID: "TextDoc1"})
 	for _, p := range doc.Paragraphs {
 		if p.Text != nil {
 			t.Fatal("a paragraph of the transcript got the text of the words")
@@ -380,4 +408,148 @@ func TestCorsPreflight(t *testing.T) {
 	})
 	check(t, rec.Code, 204)
 	check(t, rec.Header().Get("Access-Control-Allow-Headers"), "X-API-Key")
+}
+
+const vtt = "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.500\n.שלום לכם\n\n2\n00:00:02.500 --> 00:00:04.000\n<i>חברים</i>\n"
+
+func TestCheckedSubtitlesAreTheWordsNoTranscriptionJob(t *testing.T) {
+	e := newEnv(t)
+	e.mdb["Unit0001/he"] = "Vtt00001"
+	e.km.files["Vtt00001"] = vtt
+	run := new(models.Run)
+	check(t, e.do("POST", "/cus/Unit0001/markup", run).Code, 202)
+	check(t, []interface{}{run.Stage, run.WordsSource, *run.VttFileUID, run.Jobs},
+		[]interface{}{"speakers", "vtt", "Vtt00001", models.Jobs{Speakers: "s1"}})
+	check(t, len(e.ai.calls), 1)
+	c := e.ai.calls[0]
+	check(t, []string{c[0], c[1], c[2], c[4]},
+		[]string{"speakers", "https://cdn.kabbalahmedia.info/AudioOr1", "he", "Unit0001"})
+	check(t, c[3], "1\n00:00:01,000 --> 00:00:02,500\nשלום לכם.\n\n2\n00:00:02,500 --> 00:00:04,000\nחברים\n\n")
+	e.ai.jobs["s1"].Status = "done"
+	check(t, e.run("/cus/Unit0001/runs/latest").Status, "ready")
+	doc := new(models.Document)
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	check(t, doc.Run.WordsSource, "vtt")
+}
+
+func TestSubtitlesInAnotherLanguageOrUnusableGoToTheSTT(t *testing.T) {
+	e := newEnv(t)
+	e.mdb["Unit0001/ru"] = "Vtt00001"
+	run := new(models.Run)
+	e.do("POST", "/cus/Unit0001/markup", run)
+	check(t, []interface{}{run.Stage, run.WordsSource, run.VttFileUID}, []interface{}{"words", "stt", (*string)(nil)})
+
+	e.mdb["Unit0001/he"] = "Vtt00002"
+	e.km.files["Vtt00002"] = "WEBVTT\n\n"
+	e.do("POST", "/cus/Unit0001/markup?force=true", run)
+	check(t, []interface{}{run.Stage, run.WordsSource, run.VttFileUID}, []interface{}{"words", "stt", (*string)(nil)})
+
+	e.mdb["Unit0001/he"] = "Vtt00003" // not on the CDN
+	check(t, e.do("POST", "/cus/Unit0001/markup?force=true", nil).Code, 502)
+}
+
+func TestMDBDownFailsTheStart(t *testing.T) {
+	e := newEnv(t)
+	e.km.unit.ID = "Broken01"
+	km := *e.km
+	e.p.Kmedia = &brokenKmedia{&km}
+	check(t, e.do("POST", "/cus/Broken01/markup", nil).Code, 502)
+}
+
+type brokenKmedia struct{ *fakeKmedia }
+
+func (k *brokenKmedia) FetchUnit(uid string) (*kmedia.Unit, error) { return k.unit, nil }
+
+type rebuilt struct {
+	Rev        int                    `json:"rev"`
+	Unchanged  bool                   `json:"unchanged"`
+	Current    bool                   `json:"current"`
+	WordsRunID string                 `json:"words_run_id"`
+	Source     string                 `json:"source"`
+	Transcript *models.FileRef        `json:"transcript"`
+	Stats      map[string]interface{} `json:"stats"`
+}
+
+func TestRebuildFromTheKeptWordsAndDiarization(t *testing.T) {
+	e := newEnv(t)
+	check(t, e.do("POST", "/cus/Unit0001/rebuild", nil).Code, 404) // nothing to rebuild from
+	first := new(models.Run)
+	e.do("POST", "/cus/Unit0001/markup", first)
+	e.finish()
+	calls := len(e.ai.calls)
+
+	// the same input: no new revision
+	out := new(rebuilt)
+	check(t, e.do("POST", "/cus/Unit0001/rebuild", out).Code, 200)
+	check(t, []interface{}{out.Rev, out.Unchanged, out.Current, out.WordsRunID, out.Source, *out.Transcript},
+		[]interface{}{1, true, true, first.ID, "transcript", models.FileRef{FileUID: "TextDoc1"}})
+
+	// the transcript is gone from kmedia: built from the audio, a new revision
+	files := e.km.unit.Files
+	e.km.unit.Files = files[:2]
+	out = new(rebuilt)
+	check(t, e.do("POST", "/cus/Unit0001/rebuild", out).Code, 201)
+	check(t, []interface{}{out.Rev, out.Unchanged, out.Current, out.Source, out.Transcript},
+		[]interface{}{2, false, true, "audio", (*models.FileRef)(nil)})
+	doc := new(models.Document)
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	check(t, []interface{}{doc.Segmentation.Rev, doc.Run.Source, doc.Transcript, doc.Paragraphs[0].Text != nil},
+		[]interface{}{2, "audio", (*models.FileRef)(nil), true})
+
+	// a new transcript file in kmedia: the document names it, not the run's
+	e.km.unit.Files = append(files[:2:2], kmedia.File{ID: "TextNew1", Type: "text", Language: "he", Name: "heb_o_y.docx"})
+	e.do("POST", "/cus/Unit0001/rebuild", out)
+	check(t, []interface{}{out.Rev, out.Source}, []interface{}{3, "transcript"})
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	check(t, *doc.Transcript, models.FileRef{FileUID: "TextNew1"})
+
+	// a transcript that cannot be had is an error, not a rebuild from the audio
+	e.km.noDoc = true
+	check(t, e.do("POST", "/cus/Unit0001/rebuild", nil).Code, 502)
+	e.km.noDoc = false
+	check(t, len(e.ai.calls), calls) // no ai-trns
+	runs, _ := e.p.Store.Runs("Unit0001")
+	check(t, len(runs), 1)
+
+	// a human revision stays current
+	if err := e.p.Store.AddSegmentation(&models.Segmentation{CuUID: "Unit0001", FileUID: "AudioOr1",
+		WordsRunID: first.ID, Source: "human", Data: models.SegmentationData{Source: "audio"}}); err != nil {
+		t.Fatal(err)
+	}
+	e.km.transcript = "<p>" + strings.Join(paras[:10], "</p><p>") + "</p>"
+	e.do("POST", "/cus/Unit0001/rebuild", out)
+	check(t, []interface{}{out.Rev, out.Unchanged, out.Current}, []interface{}{5, false, false})
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	check(t, []interface{}{doc.Segmentation.Rev, doc.Segmentation.Source}, []interface{}{4, "human"})
+}
+
+func TestRebuildFromAGivenRun(t *testing.T) {
+	e := newEnv(t)
+	first := new(models.Run)
+	e.do("POST", "/cus/Unit0001/markup", first)
+	e.finish()
+	second := new(models.Run)
+	e.do("POST", "/cus/Unit0001/markup?force=true", second)
+	// the latest run is pending: the latest ready one is used
+	out := new(rebuilt)
+	e.do("POST", "/cus/Unit0001/rebuild", out)
+	check(t, out.WordsRunID, first.ID)
+	check(t, e.do("POST", "/cus/Unit0001/rebuild?run="+second.ID, nil).Code, 409)
+	check(t, e.do("POST", "/cus/Unit0001/rebuild?run=nosuchrun", nil).Code, 404)
+	check(t, e.do("POST", "/cus/Unit0002/rebuild?run="+first.ID, nil).Code, 404)
+	e.do("POST", "/cus/Unit0001/rebuild?run="+first.ID, out)
+	check(t, []interface{}{out.WordsRunID, out.Unchanged}, []interface{}{first.ID, true})
+	// only from this host, like a run
+	check(t, e.do("POST", "/cus/Unit0001/rebuild", nil, func(r *http.Request) { r.RemoteAddr = "203.0.113.7:1" }).Code, 403)
+}
+
+func TestATranscriptThatCannotBeHadAtARunsEndGivesTheAudioNotAFailure(t *testing.T) {
+	e := newEnv(t)
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.km.noDoc = true
+	e.finish()
+	check(t, e.run("/cus/Unit0001/runs/latest").Status, "ready")
+	doc := new(models.Document)
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	check(t, []interface{}{doc.Run.Source, doc.Transcript}, []interface{}{"audio", (*models.FileRef)(nil)})
 }

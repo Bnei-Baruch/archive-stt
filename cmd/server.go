@@ -16,6 +16,7 @@ import (
 	"github.com/Bnei-Baruch/archive-stt/aitrns"
 	"github.com/Bnei-Baruch/archive-stt/api"
 	"github.com/Bnei-Baruch/archive-stt/kmedia"
+	"github.com/Bnei-Baruch/archive-stt/mdb"
 	"github.com/Bnei-Baruch/archive-stt/pipeline"
 	"github.com/Bnei-Baruch/archive-stt/store"
 	"github.com/Bnei-Baruch/archive-stt/utils"
@@ -38,11 +39,22 @@ func NewPipeline() (*pipeline.Pipeline, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &pipeline.Pipeline{
+	p := &pipeline.Pipeline{
 		Store:  s,
 		AiTrns: aitrns.New(viper.GetString("ai-trns.url"), viper.GetString("ai-trns.key"), viper.GetDuration("ai-trns.timeout")),
 		Kmedia: kmedia.New(viper.GetString("kmedia.url"), viper.GetString("kmedia.cdn-url"), viper.GetDuration("kmedia.timeout")),
-	}, nil
+	}
+	if u := viper.GetString("mdb.url"); u != "" {
+		m, err := mdb.Open(u)
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		p.Subtitles = m
+	} else {
+		slog.Warn("no mdb.url: the words always come from the STT, checked subtitles are not looked for")
+	}
+	return p, nil
 }
 
 func serverFn(cmd *cobra.Command, args []string) {

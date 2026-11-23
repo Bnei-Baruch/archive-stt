@@ -21,7 +21,9 @@ type fakeServer struct {
 	checks  map[string]int
 	starts  []string
 	steps   int
-	missing map[string]bool // POST -> 404
+	missing map[string]bool   // POST -> 404
+	words   map[string]string // uid -> words_source of its ready run
+	rebuilt []string
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +31,18 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/") // cus/{uid}/...
 	uid := parts[1]
+	if r.Method == http.MethodPost && parts[2] == "rebuild" {
+		if f.missing[uid] {
+			w.WriteHeader(404)
+			json.NewEncoder(w).Encode(map[string]string{"detail": "no ready run"})
+			return
+		}
+		f.rebuilt = append(f.rebuilt, uid)
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(map[string]interface{}{"rev": 2, "unchanged": uid == "Same0001",
+			"current": uid != "Human001"})
+		return
+	}
 	if r.Method == http.MethodPost {
 		if f.missing[uid] {
 			w.WriteHeader(404)
@@ -58,7 +72,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.status[uid] = st
 		}
 	}
-	out := map[string]interface{}{"status": st, "stage": "speakers"}
+	out := map[string]interface{}{"status": st, "stage": "speakers", "words_source": f.words[uid]}
 	if st == "failed" {
 		out["error"] = "speakers: boom\nline two"
 	}
@@ -194,4 +208,38 @@ func TestReadUIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, got, []string{"Uid00001", "File0001", "File0002", "Stdin001"})
+}
+
+func TestRebuild(t *testing.T) {
+	f := &fakeServer{status: map[string]string{}, checks: map[string]int{}, missing: map[string]bool{"Missing1": true}}
+	r, out := setup(t, f)
+	r.Rebuild = true
+	os.WriteFile(r.OKPath, []byte("Done0001\n"), 0o644)
+	todo, _ := r.Prepare([]string{"Done0001", "New00001", "Same0001", "Human001", "Missing1"})
+	if err := r.Run(todo); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, f.rebuilt, []string{"New00001", "Same0001", "Human001"})
+	eq(t, f.starts, []string(nil))
+	eq(t, r.Passed, []string{"New00001", "Same0001", "Human001"})
+	eq(t, read(t, r.FailedPath), "Missing1\t404 no ready run\n")
+	for _, s := range []string{"Same0001: ok -- rev 2 unchanged", "Human001: ok -- rev 2, not current"} {
+		if !strings.Contains(out.String(), s) {
+			t.Fatal(out.String())
+		}
+	}
+}
+
+func TestRedoSTTRunsAgainOnlyTheReadyFromTheSTT(t *testing.T) {
+	f := &fakeServer{status: map[string]string{"Stt00001": "ready", "Vtt00001": "ready"}, checks: map[string]int{},
+		words: map[string]string{"Stt00001": "stt", "Vtt00001": "vtt"}}
+	r, _ := setup(t, f)
+	r.RedoSTT = true
+	os.WriteFile(r.OKPath, []byte("Stt00001\nVtt00001\n"), 0o644) // the ok list does not skip them
+	todo, _ := r.Prepare([]string{"Stt00001", "Vtt00001", "New00001"})
+	if err := r.Run(todo); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, f.starts, []string{"Stt00001?force=false", "New00001?force=false"})
+	eq(t, len(r.Passed), 3)
 }

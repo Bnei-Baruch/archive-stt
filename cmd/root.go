@@ -48,6 +48,7 @@ var defaults = map[string]interface{}{
 	"kmedia.cdn-url":      "https://cdn.kabbalahmedia.info",
 	"kmedia.timeout":      "30s",
 	"data.dir":            "./data",
+	"mdb.url":             "", // read only; empty = the words always from the STT
 }
 
 func initConfig() {

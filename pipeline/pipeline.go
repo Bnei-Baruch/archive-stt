@@ -1,6 +1,8 @@
 // Package pipeline: a run -- the lesson's audio -> ai-trns words job -> ai-trns speakers job -> its words
-// (?format=json) and diarization (?format=paragraphs without the text) kept, segmentation revision `auto`. Driven by polling (Sync): on every read and by the maintenance loop (SyncAll).
-// One run per lesson at a time.
+// (?format=json) and diarization (?format=paragraphs without the text) kept, segmentation revision `auto`.
+// A lesson with checked subtitles (MDB, made before mdb.VTTBefore) skips the words job: its cues go to the
+// speakers job instead. Driven by polling (Sync): on every read and by the maintenance loop (SyncAll).
+// One run per lesson at a time. Rebuild: a new revision `auto` from a run's kept words and diarization.
 package pipeline
 
 import (
@@ -19,6 +21,7 @@ import (
 	"github.com/Bnei-Baruch/archive-stt/markup"
 	"github.com/Bnei-Baruch/archive-stt/models"
 	"github.com/Bnei-Baruch/archive-stt/store"
+	"github.com/Bnei-Baruch/archive-stt/subtitles"
 	"github.com/Bnei-Baruch/archive-stt/utils"
 )
 
@@ -34,14 +37,21 @@ type AiTrns interface {
 type Kmedia interface {
 	FetchUnit(uid string) (*kmedia.Unit, error)
 	FetchTranscriptHTML(fileID string) (string, error)
+	FetchFile(fileID string) ([]byte, error)
 	AudioURL(fileID string) string
 }
 
+// Subtitles finds the lesson's checked subtitles (mdb.Client): a file uid or ""
+type Subtitles interface {
+	VTT(cuUID, language string) (string, error)
+}
+
 type Pipeline struct {
-	Store  *store.Store
-	AiTrns AiTrns
-	Kmedia Kmedia
-	mu     sync.Mutex
+	Store     *store.Store
+	AiTrns    AiTrns
+	Kmedia    Kmedia
+	Subtitles Subtitles // nil: no MDB, the words always come from the STT
+	mu        sync.Mutex
 }
 
 // StartError is a run that could not start: Status is the HTTP status to answer with
@@ -82,19 +92,15 @@ func (p *Pipeline) jobDone(id string) (*aitrns.Job, string, error) {
 	return j, "", nil
 }
 
-// BuildSegmentation is the automatic segmentation of a run's words and diarization (and the lesson's transcript,
-// if it has one)
-func (p *Pipeline) BuildSegmentation(run *models.Run, words *models.Words,
-	d *models.Diarization) *models.SegmentationData {
-	html := ""
-	if t := run.Data.Transcript; t != nil {
-		var err error
-		if html, err = p.Kmedia.FetchTranscriptHTML(t.FileUID); err != nil {
-			slog.Warn("no transcript, built from the audio", "uid", run.CuUID, "err", err)
-			html = ""
-		}
+// BuildSegmentation is the automatic segmentation of a run's words and diarization and the lesson's transcript
+// (html: its doc2html; nil / "": none, built from the audio)
+func BuildSegmentation(run *models.Run, words *models.Words, d *models.Diarization, transcript *models.FileRef,
+	html string) *models.SegmentationData {
+	seg := markup.Build(d.Paragraphs, words.Words, html, markup.Duration(run.Data.Media, d.Paragraphs))
+	if seg.Source == common.SegFromTranscript {
+		seg.Transcript = transcript
 	}
-	return markup.Build(d.Paragraphs, words.Words, html, markup.Duration(run.Data.Media, d.Paragraphs))
+	return seg
 }
 
 // diarizeResult is a finished diarize job's words (?format=json) and paragraphs (?format=paragraphs); failure:
@@ -183,7 +189,13 @@ func (p *Pipeline) advance(run models.Run) (*models.Run, error) {
 	if err := p.Store.SaveDiarization(run.ID, d); err != nil {
 		return failed(run, "saving the diarization: "+err.Error()), nil
 	}
-	seg := p.BuildSegmentation(&run, words, d)
+	// a run is not failed for archive-unzip: built from the audio, a rebuild later takes the transcript
+	transcript, html, err := p.transcript(&run)
+	if err != nil {
+		slog.Warn("no transcript, built from the audio", "uid", run.CuUID, "err", err)
+		transcript, html = nil, ""
+	}
+	seg := BuildSegmentation(&run, words, d, transcript, html)
 	if err := p.Store.AddSegmentation(&models.Segmentation{CuUID: run.CuUID, FileUID: run.FileUID,
 		WordsRunID: run.ID, Source: common.RevAuto, Author: run.Author, Data: *seg}); err != nil {
 		return failed(run, "saving the segmentation: "+err.Error()), nil
@@ -281,12 +293,22 @@ func (p *Pipeline) Start(uid, language string, force bool, author string) (*mode
 		return nil, &StartError{422, fmt.Sprintf("unit %s: language %s is not transcribed (one of %s)", uid,
 			language, strings.Join(common.Languages, ", "))}
 	}
-	audio, transcript := kmedia.LessonFiles(unit, language)
+	audio, _ := kmedia.LessonFiles(unit, language)
 	if audio == nil {
 		return nil, &StartError{422, fmt.Sprintf("unit %s has no %s audio", uid, language)}
 	}
 	audioURL := p.Kmedia.AudioURL(audio.ID)
-	jobID, err := p.AiTrns.CreateWordsJob(audioURL, language)
+	vttUID, srt, err := p.checkedSubtitles(uid, language)
+	if err != nil {
+		return nil, err
+	}
+	stage, wordsSource, jobs := common.StageWords, common.WordsSourceSTT, models.Jobs{}
+	if srt != "" { // the words are the subtitles': only the speakers job, which times them on the audio
+		stage, wordsSource = common.StageSpeakers, common.WordsSourceVTT
+		jobs.Speakers, err = p.AiTrns.CreateSpeakersJob(audioURL, language, srt, uid)
+	} else {
+		jobs.Words, err = p.AiTrns.CreateWordsJob(audioURL, language)
+	}
 	if err != nil {
 		return nil, &StartError{502, err.Error()}
 	}
@@ -296,22 +318,176 @@ func (p *Pipeline) Start(uid, language string, force bool, author string) (*mode
 	}
 	run = &models.Run{
 		ID: newID(), CuUID: uid, Kind: common.RunKindFirst, Language: language, FileUID: audio.ID,
-		Stage: common.StageWords, Status: common.StatusPending, WordsSource: common.WordsSourceSTT,
-		Jobs: models.Jobs{Words: jobID}, Created: utils.Now(),
+		Stage: stage, Status: common.StatusPending, WordsSource: wordsSource, Jobs: jobs, Created: utils.Now(),
 		Data: models.RunData{AudioURL: audioURL, OriginalLanguage: original,
 			Media: models.Media{FileUID: audio.ID, DurationS: duration}},
 	}
 	if author != "" {
 		run.Author = &author
 	}
-	if transcript != nil {
-		run.Data.Transcript = &models.FileRef{FileUID: transcript.ID}
+	if vttUID != "" && srt != "" {
+		run.VttFileUID = &vttUID
 	}
 	if err := p.Store.SaveRun(run); err != nil {
 		return nil, err
 	}
-	slog.Info("run started", "uid", uid, "id", run.ID, "job", jobID)
+	slog.Info("run started", "uid", uid, "id", run.ID, "words", wordsSource, "stage", stage)
 	return run, nil
+}
+
+// checkedSubtitles is the lesson's checked subtitles in language (MDB) and their cues as SRT; ("", "") if it has
+// none or there is no MDB. A file that gives no cues is logged and the STT is used.
+func (p *Pipeline) checkedSubtitles(uid, language string) (string, string, error) {
+	if p.Subtitles == nil {
+		return "", "", nil
+	}
+	vttUID, err := p.Subtitles.VTT(uid, language)
+	if err != nil {
+		return "", "", &StartError{502, "mdb: " + err.Error()}
+	}
+	if vttUID == "" {
+		return "", "", nil
+	}
+	b, err := p.Kmedia.FetchFile(vttUID)
+	if err != nil {
+		return "", "", &StartError{502, "subtitles: " + err.Error()}
+	}
+	srt, n, err := subtitles.ToSRT(string(b))
+	if err != nil || n == 0 {
+		slog.Warn("subtitles unusable, the words from the STT", "uid", uid, "vtt", vttUID, "cues", n, "err", err)
+		return vttUID, "", nil
+	}
+	return vttUID, srt, nil
+}
+
+// transcript is the lesson's transcript in kmedia now, in the run's language, and its doc2html; (nil, "") if it
+// has none. Taken when a segmentation is built (a run's end, a rebuild), not when the run starts: the newest.
+func (p *Pipeline) transcript(run *models.Run) (*models.FileRef, string, error) {
+	unit, err := p.Kmedia.FetchUnit(run.CuUID)
+	if errors.Is(err, kmedia.ErrNotFound) {
+		return nil, "", err
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("kmedia: %w", err)
+	}
+	_, t := kmedia.LessonFiles(unit, run.Language)
+	if t == nil {
+		return nil, "", nil
+	}
+	html, err := p.Kmedia.FetchTranscriptHTML(t.ID)
+	if err != nil {
+		return nil, "", fmt.Errorf("transcript: %w", err)
+	}
+	return &models.FileRef{FileUID: t.ID}, html, nil
+}
+
+// RebuildError is a rebuild that could not be done: Status is the HTTP status to answer with
+type RebuildError = StartError
+
+// Rebuilt is what a rebuild did
+type Rebuilt struct {
+	Rev        int                    `json:"rev"`
+	Unchanged  bool                   `json:"unchanged"` // the same as the last revision auto of that run: none added
+	Current    bool                   `json:"current"`   // the lesson's current revision (false: a human one is)
+	WordsRunID string                 `json:"words_run_id"`
+	Source     string                 `json:"source"` // transcript | audio
+	Transcript *models.FileRef        `json:"transcript"`
+	Stats      map[string]interface{} `json:"stats"`
+}
+
+// Rebuild writes a new segmentation revision `auto` from a run's kept words and diarization (runID; "": the
+// lesson's latest ready run that has them) and the lesson's transcript in kmedia now -- no ai-trns. Human
+// revisions stay current. A revision equal to the last `auto` of the same run is not written again.
+func (p *Pipeline) Rebuild(uid, runID, author string) (*Rebuilt, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	run, err := p.rebuildRun(uid, runID)
+	if err != nil {
+		return nil, err
+	}
+	words, err := p.Store.LoadWords(run.FileUID, run.ID)
+	if err != nil {
+		return nil, &RebuildError{409, fmt.Sprintf("run %s: no words kept: %v", run.ID, err)}
+	}
+	d, err := p.Store.Diarization(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, &RebuildError{409, fmt.Sprintf("run %s: no diarization kept", run.ID)}
+	}
+	// not silently from the audio: that would replace a revision built on the transcript with a worse one
+	transcript, html, err := p.transcript(run)
+	if errors.Is(err, kmedia.ErrNotFound) {
+		return nil, &RebuildError{404, "no kmedia unit " + uid}
+	}
+	if err != nil {
+		return nil, &RebuildError{502, err.Error()}
+	}
+	data := BuildSegmentation(run, words, d, transcript, html)
+	seg, err := p.Store.LastAuto(uid, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	unchanged := seg != nil && sameData(&seg.Data, data)
+	if !unchanged {
+		seg = &models.Segmentation{CuUID: uid, FileUID: run.FileUID, WordsRunID: run.ID, Source: common.RevAuto,
+			Data: *data}
+		if author != "" {
+			seg.Author = &author
+		}
+		if err := p.Store.AddSegmentation(seg); err != nil {
+			return nil, err
+		}
+		slog.Info("rebuilt", "uid", uid, "run", run.ID, "rev", seg.Rev, "source", data.Source)
+	}
+	current, err := p.Store.Segmentation(uid, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &Rebuilt{Rev: seg.Rev, Unchanged: unchanged, Current: current != nil && current.Rev == seg.Rev,
+		WordsRunID: run.ID, Source: data.Source, Transcript: data.Transcript, Stats: data.Stats}, nil
+}
+
+// rebuildRun is the run to rebuild from: the given one (of this lesson, ready) or the latest ready one with a
+// diarization kept
+func (p *Pipeline) rebuildRun(uid, runID string) (*models.Run, error) {
+	if runID != "" {
+		run, err := p.Store.GetRun(runID)
+		if err != nil {
+			return nil, err
+		}
+		if run == nil || run.CuUID != uid {
+			return nil, &RebuildError{404, "no such run of this lesson"}
+		}
+		if run.Status != common.StatusReady {
+			return nil, &RebuildError{409, fmt.Sprintf("run %s is %s", run.ID, run.Status)}
+		}
+		return run, nil
+	}
+	runs, err := p.Store.Runs(uid)
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range runs {
+		if run.Status != common.StatusReady {
+			continue
+		}
+		d, err := p.Store.Diarization(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if d != nil {
+			return run, nil
+		}
+	}
+	return nil, &RebuildError{404, "no ready run with its words and diarization kept"}
+}
+
+func sameData(a, b *models.SegmentationData) bool {
+	x, err1 := json.Marshal(a)
+	y, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && string(x) == string(y)
 }
 
 // Document is the lesson's markup at the current (rev 0) or the given segmentation revision; nil if none

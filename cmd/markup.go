@@ -22,6 +22,7 @@ const publicURL = "https://ai-tools.kab.info/archive-stt"
 var markupFlags struct {
 	language, ssh, url, ok, failed string
 	force, dryRun, noSSH           bool
+	rebuild, redoSTT               bool
 	parallel, port                 int
 	poll                           time.Duration
 }
@@ -44,7 +45,11 @@ A lesson in the ok list (--ok) is skipped without asking the server. On the serv
 again; pending -> waited for. --force runs them all again. A start answered 404 (no such unit), 422 (no audio)
 or else goes to the failed list (--failed, uid<TAB>error); a uid leaves it when a later run passes.
 --parallel runs are kept in flight (default 1: the GPU is shared with ai-trns's other jobs and the live
-broadcast). Ctrl+C stops starting new ones and waits for the started; a second Ctrl+C leaves them running on the
+broadcast). --redo-stt runs again the ready lessons whose words are from the STT: the server takes the lesson's
+checked subtitles (MDB, made before 2027) where it has them -- give it the lessons that have them.
+--rebuild starts no runs: each lesson's segmentation is rebuilt on the server from its kept words and
+diarization and its transcript in kmedia now, no ai-trns (lists: rebuild-ok.txt, rebuild-failed.txt).
+Ctrl+C stops starting new ones and waits for the started; a second Ctrl+C leaves them running on the
 server (a later batch picks them up). At the end: this batch's ok and failed uids; exit code 1 if any failed.`,
 	Args: cobra.MinimumNArgs(1),
 	Run:  markupFn,
@@ -55,6 +60,8 @@ func init() {
 	f := markupCmd.Flags()
 	f.StringVar(&markupFlags.language, "language", "", "the audio's language (default: the lesson's original)")
 	f.BoolVar(&markupFlags.force, "force", false, "run again even if the markup is ready")
+	f.BoolVar(&markupFlags.redoSTT, "redo-stt", false, "run again the ready lessons whose words are from the STT")
+	f.BoolVar(&markupFlags.rebuild, "rebuild", false, "rebuild the segmentation from the kept words, no runs")
 	f.IntVar(&markupFlags.parallel, "parallel", 1, "runs in flight at once")
 	f.DurationVar(&markupFlags.poll, "poll", 20*time.Second, "between status checks")
 	f.BoolVar(&markupFlags.dryRun, "dry-run", false, "only show what would be started")
@@ -62,8 +69,10 @@ func init() {
 	f.IntVar(&markupFlags.port, "port", 8771, "the local end of the tunnel")
 	f.BoolVar(&markupFlags.noSSH, "no-ssh", false, "no tunnel: call --url directly")
 	f.StringVar(&markupFlags.url, "url", "", "the service (default: the tunnel, http://127.0.0.1:PORT)")
-	f.StringVar(&markupFlags.ok, "ok", "markup-ok.txt", "lessons marked up: a uid per line, appended")
-	f.StringVar(&markupFlags.failed, "failed", "markup-failed.txt", "lessons that failed: uid<TAB>error")
+	f.StringVar(&markupFlags.ok, "ok", "", "lessons done: a uid per line, appended (default: markup-ok.txt, "+
+		"rebuild-ok.txt with --rebuild)")
+	f.StringVar(&markupFlags.failed, "failed", "", "lessons that failed: uid<TAB>error (default: markup-failed.txt, "+
+		"rebuild-failed.txt with --rebuild)")
 	viper.SetDefault("markup.ssh", "")
 }
 
@@ -108,6 +117,19 @@ func markupFn(cmd *cobra.Command, args []string) {
 	if fl.language != "" && !common.IsLanguage(fl.language) {
 		fatal("--language: one of %s", strings.Join(common.Languages, ", "))
 	}
+	if fl.rebuild && (fl.force || fl.redoSTT || fl.language != "") {
+		fatal("--rebuild: without --force, --redo-stt and --language")
+	}
+	list := "markup"
+	if fl.rebuild {
+		list = "rebuild"
+	}
+	if fl.ok == "" {
+		fl.ok = list + "-ok.txt"
+	}
+	if fl.failed == "" {
+		fl.failed = list + "-failed.txt"
+	}
 	if fl.parallel < 1 {
 		fatal("--parallel: 1 or more")
 	}
@@ -125,7 +147,8 @@ func markupFn(cmd *cobra.Command, args []string) {
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	stop, abort := make(chan struct{}), make(chan struct{})
-	r := &batch.Runner{Base: base, StatusBase: base, Language: fl.language, Force: fl.force, Parallel: fl.parallel,
+	r := &batch.Runner{Base: base, StatusBase: base, Language: fl.language, Force: fl.force,
+		RedoSTT: fl.redoSTT, Rebuild: fl.rebuild, Parallel: fl.parallel,
 		Poll: fl.poll, DryRun: fl.dryRun, OKPath: fl.ok, FailedPath: fl.failed, Out: os.Stdout, HTTP: client,
 		Stop: stop, Abort: abort}
 	todo, err := r.Prepare(uids)

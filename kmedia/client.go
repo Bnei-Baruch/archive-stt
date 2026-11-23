@@ -93,6 +93,18 @@ func (c *Client) FetchTranscriptHTML(fileID string) (string, error) {
 	return string(b), nil
 }
 
+// FetchFile is the file from the CDN (a subtitles file, ...)
+func (c *Client) FetchFile(fileID string) ([]byte, error) {
+	b, status, err := c.get(c.AudioURL(fileID), 0)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("cdn %s: %d", fileID, status)
+	}
+	return b, nil
+}
+
 // AudioURL is the file on the CDN
 func (c *Client) AudioURL(fileID string) string {
 	return c.CDNURL + "/" + fileID
