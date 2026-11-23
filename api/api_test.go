@@ -742,3 +742,57 @@ func TestFindAPhraseInTheLesson(t *testing.T) {
 	r = find("זו המערכת של הבורא").Results[0]
 	check(t, []interface{}{r.Source, r.P, r.Score}, []interface{}{"audio", (*int)(nil), 1.0})
 }
+
+func TestContentUnitsWithoutTranscriptAndTheirContent(t *testing.T) {
+	e := newEnv(t)
+	check(t, e.do("GET", "/cus/Unit0001/content", nil).Code, 404)
+	units := func(q string) []models.UnitRef {
+		var out []models.UnitRef
+		check(t, e.do("GET", "/cus"+q, &out).Code, 200)
+		return out
+	}
+	check(t, units(""), []models.UnitRef{})
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.finish()
+	check(t, units(""), []models.UnitRef{}) // on a transcript: not listed
+	check(t, e.do("GET", "/cus?lang=xx", nil).Code, 400)
+
+	// no transcript: listed, its text is the heard words
+	e.km.unit.Files = e.km.unit.Files[:2]
+	e.do("POST", "/cus/Unit0001/rebuild", nil)
+	check(t, units(""), []models.UnitRef{{UID: "Unit0001", Language: "he"}})
+	check(t, units("?lang=he"), []models.UnitRef{{UID: "Unit0001", Language: "he"}})
+	check(t, units("?lang=ru"), []models.UnitRef{})
+
+	rec := e.do("GET", "/cus/Unit0001/content", nil)
+	check(t, []interface{}{rec.Code, rec.Header().Get("Content-Type"), rec.Header().Get("Cache-Control")},
+		[]interface{}{200, "text/plain; charset=utf-8", "public, max-age=300"})
+	text := rec.Body.String()
+	doc := new(models.Document)
+	e.do("GET", "/cus/Unit0001/markup", doc)
+	got := strings.Split(text, "\n\n")
+	var want []string
+	for _, p := range doc.Paragraphs {
+		if p.Text != nil && strings.TrimSpace(*p.Text) != "" {
+			want = append(want, *p.Text)
+		}
+	}
+	if len(got) < 2 {
+		t.Fatalf("%d paragraphs:\n%s", len(got), text)
+	}
+	check(t, got, want) // the markup's paragraphs' text
+	check(t, e.do("GET", "/cus/Unit0001/content?lang=ru", nil).Code, 404)
+	check(t, e.do("GET", "/cus/Unit0001/content?lang=he", nil).Code, 200)
+
+	// its fragments are located among the heard words
+	words := strings.Fields(got[1])
+	q := url.Values{}
+	q.Add("q", strings.Join(words[:min(3, len(words))], " "))
+	out := new(located)
+	check(t, e.do("GET", "/cus/Unit0001/locate?"+q.Encode(), out).Code, 200)
+	r := out.Results[0]
+	check(t, []interface{}{r.Found, r.P, r.W}, []interface{}{"exact", (*int)(nil), (*int)(nil)})
+	if r.Start == nil || *r.End <= *r.Start {
+		t.Fatalf("%+v", r)
+	}
+}

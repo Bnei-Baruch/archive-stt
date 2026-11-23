@@ -134,19 +134,25 @@ type Timecode struct {
 	Paragraphs [][]float64 `json:"paragraphs"`
 }
 
+// UnitRef is a content unit with markup and the language of its current revision (GET /cus)
+type UnitRef struct {
+	UID      string `json:"uid"`
+	Language string `json:"language"`
+}
+
 // Located is the fragments of the lesson's transcript found (GET /cus/{uid}/locate), in the order asked
 type Located struct {
 	UID        string     `json:"uid"`
 	Language   string     `json:"language"`
-	Transcript FileRef    `json:"transcript"`
+	Transcript *FileRef   `json:"transcript"` // nil: found among the heard words (no transcript)
 	RunID      string     `json:"run_id"`
 	Rev        int        `json:"rev"`
 	Results    []Fragment `json:"results"`
 }
 
 // Fragment is a fragment found: Found exact | fuzzy | "" (not found: the rest null); Start / End its time on the
-// media, P / W its first word (the <p> of the transcript's doc2html and the place there, as the timecode),
-// Chapter the chapter at its start
+// media, P / W its first word (the <p> of the transcript's doc2html and the place there, as the timecode; null
+// when found among the heard words), Chapter the chapter at its start
 type Fragment struct {
 	Q       string   `json:"q"`
 	Found   string   `json:"found"`

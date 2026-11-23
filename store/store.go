@@ -301,3 +301,29 @@ func (s *Store) Segmentation(cuUID string, rev int) (*models.Segmentation, error
 	return scanSegmentation(s.DB.QueryRow("SELECT "+segCols+" FROM segmentation WHERE cu_uid = ? "+
 		"ORDER BY source = 'auto', rev DESC LIMIT 1", cuUID))
 }
+
+// WithoutTranscript are the content units whose current revision has no transcript (built from the audio), in language
+// ("": any): uid and the language of the revision's run, by uid
+func (s *Store) WithoutTranscript(language string) ([]models.UnitRef, error) {
+	rows, err := s.DB.Query(`
+SELECT g.cu_uid, r.language
+FROM (SELECT cu_uid, words_run_id, data,
+             ROW_NUMBER() OVER (PARTITION BY cu_uid ORDER BY source = 'auto', rev DESC) AS n
+      FROM segmentation) g
+    JOIN run r ON r.id = g.words_run_id
+WHERE g.n = 1 AND json_extract(g.data, '$.transcript') IS NULL AND (? = '' OR r.language = ?)
+ORDER BY g.cu_uid`, language, language)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]models.UnitRef, 0)
+	for rows.Next() {
+		var l models.UnitRef
+		if err := rows.Scan(&l.UID, &l.Language); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}

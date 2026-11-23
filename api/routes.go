@@ -7,10 +7,15 @@
 //	GET  /cus/{uid}/timecode?lang=                 the time of every word of the transcript: paragraphs[p][w] --
 //	                                               the w-th word (by whitespace) of the p-th <p> of its doc2html;
 //	                                               public; 404 without markup on a transcript
-//	GET  /cus/{uid}/locate?q=&lang=                fragments of the transcript (a search engine's highlights)
-//	                                               by their first and last words and length: q=<first>|<last>|<n>,
-//	                                               the last two optional, up to 20;
-//	                                               where (p, w), when (start, end), the chapter; public
+//	GET  /cus?lang=                                the content units whose current revision has no transcript:
+//	                                               [{uid, language}]; public
+//	GET  /cus/{uid}/content?lang=                  the heard words as plain text, paragraphs apart by an empty
+//	                                               line (for a search engine, where there is no transcript); public
+//	GET  /cus/{uid}/locate?q=&lang=                fragments of the text (a search engine's highlights) -- the
+//	                                               transcript's, else the heard words -- by their first and last
+//	                                               words and length: q=<first>|<last>|<n>, the last two optional,
+//	                                               up to 20; where (p, w: in the transcript only), when (start,
+//	                                               end), the chapter; public
 //	GET  /cus/{uid}/text?at= | ?from=&to=, &lang=  the words (the transcript's, else the heard ones), paragraphs
 //	                                               and chapters at a moment or in a span (up to 15 min); public
 //	GET  /cus/{uid}/find?q=&lang=&limit=10         where the phrase is said: [{start, end, score, context,
@@ -26,6 +31,8 @@ import "net/http"
 func Handler(h *Handlers) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.Health)
+	mux.HandleFunc("GET /cus", h.GetContentUnits)
+	mux.HandleFunc("GET /cus/{uid}/content", h.GetContent)
 	mux.HandleFunc("POST /cus/{uid}/markup", h.StartMarkup)
 	mux.HandleFunc("GET /cus/{uid}/markup", h.GetMarkup)
 	mux.HandleFunc("POST /cus/{uid}/rebuild", h.Rebuild)

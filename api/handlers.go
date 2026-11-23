@@ -150,7 +150,7 @@ func (h *Handlers) GetTimecode(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(cacheControl, public)
 	if tc == nil {
-		fail(w, http.StatusNotFound, "no timecode for this lesson: no markup on a transcript (in this language)")
+		fail(w, http.StatusNotFound, "no markup for this lesson (in this language)")
 		return
 	}
 	writeJSON(w, http.StatusOK, tc)
@@ -160,7 +160,8 @@ func (h *Handlers) GetTimecode(w http.ResponseWriter, r *http.Request) {
 const MaxQueries = 20
 
 // GetLocate: GET /cus/{uid}/locate?q=<first words>|<last words>|<number of words>&q=...&lang= -> where and when
-// each fragment of the transcript is (results in the order asked); 404 as /timecode
+// each fragment of the text is (the transcript's, else the heard words; results in the order asked); 404 without
+// markup (in this language)
 func (h *Handlers) GetLocate(w http.ResponseWriter, r *http.Request) {
 	uid, ok := uidParam(w, r)
 	if !ok {
@@ -187,7 +188,7 @@ func (h *Handlers) GetLocate(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(cacheControl, public)
 	if out == nil {
-		fail(w, http.StatusNotFound, "no timecode for this lesson: no markup on a transcript (in this language)")
+		fail(w, http.StatusNotFound, "no markup for this lesson (in this language)")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -307,6 +308,52 @@ func (h *Handlers) GetFind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// GetContentUnits: GET /cus?lang= -> the content units whose current revision has no transcript (their text is the
+// heard words: GET /cus/{uid}/content), in lang (none: any); public
+func (h *Handlers) GetContentUnits(w http.ResponseWriter, r *http.Request) {
+	lang, ok := langParam(w, r)
+	if !ok {
+		return
+	}
+	out, err := h.Pipeline.ContentUnits(lang)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, public)
+	writeJSON(w, http.StatusOK, out)
+}
+
+// GetContent: GET /cus/{uid}/content?lang= -> the lesson's heard words as plain text (paragraphs apart by an empty
+// line), for a search engine; public; 404 without markup (in this language)
+func (h *Handlers) GetContent(w http.ResponseWriter, r *http.Request) {
+	uid, ok := uidParam(w, r)
+	if !ok {
+		return
+	}
+	lang, ok := langParam(w, r)
+	if !ok {
+		return
+	}
+	if _, err := h.Pipeline.Sync(uid); err != nil {
+		internal(w, r, err)
+		return
+	}
+	text, found, err := h.Pipeline.Content(uid, lang)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, public)
+	if !found {
+		fail(w, http.StatusNotFound, "no markup for this lesson (in this language)")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(text))
 }
 
 // GetRuns: GET /cus/{uid}/runs -> the lesson's runs, newest first

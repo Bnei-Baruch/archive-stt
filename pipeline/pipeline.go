@@ -604,21 +604,24 @@ func (p *Pipeline) Timecode(uid, language string) (*models.Timecode, error) {
 	return out, nil
 }
 
-// Locate finds fragments of the transcript of the lesson's current revision, in language ("": the run's): each
-// query is "<first words>|<last words>|<number of words>", the last two optional (the number: about, it picks
-// among several places). nil if there is no markup
-// on a transcript (in that language) or no alignment kept.
+// Locate finds fragments of the lesson's text, in language ("": the run's): of the current revision's transcript,
+// or of the heard words if it has none (a search engine indexes them then: GET /cus/{uid}/content). Each query is
+// "<first words>|<last words>|<number of words>", the last two optional (the number: about, it picks among several
+// places). nil if there is no markup (in that language).
 func (p *Pipeline) Locate(uid, language string, queries []string) (*models.Located, error) {
-	seg, run, err := p.current(uid, language)
+	seg, run, err := p.currentAny(uid, language)
 	if err != nil || seg == nil {
 		return nil, err
 	}
-	ix, err := p.transcriptIndex(seg, run)
+	ix, source, err := p.textIndex(seg, run)
 	if err != nil || ix == nil {
 		return nil, err
 	}
-	out := &models.Located{UID: uid, Language: run.Language, Transcript: *seg.Data.Transcript, RunID: run.ID,
-		Rev: seg.Rev, Results: make([]models.Fragment, len(queries))}
+	out := &models.Located{UID: uid, Language: run.Language, RunID: run.ID, Rev: seg.Rev,
+		Results: make([]models.Fragment, len(queries))}
+	if source == common.SegFromTranscript {
+		out.Transcript = seg.Data.Transcript
+	}
 	for k, q := range queries {
 		parts := strings.SplitN(q, "|", 3)
 		var last string
@@ -632,7 +635,10 @@ func (p *Pipeline) Locate(uid, language string, queries []string) (*models.Locat
 		r := models.Fragment{Q: q}
 		if from, to, found := ix.Locate(search.Words(parts[0]), search.Words(last), n); found != "" {
 			a, b := ix.Pos(from), ix.Pos(to)
-			r.Found, r.Start, r.End, r.P, r.W = found, &a.Start, &b.End, &a.P, &a.W
+			r.Found, r.Start, r.End = found, &a.Start, &b.End
+			if a.P >= 0 {
+				r.P, r.W = &a.P, &a.W
+			}
 			r.Chapter = chapterAt(seg.Data.Chapters, a.Start)
 		}
 		out.Results[k] = r
@@ -779,4 +785,38 @@ func (p *Pipeline) Find(uid, language, q string, limit int) (*models.Found, erro
 		}
 	}
 	return out, nil
+}
+
+// ContentUnits are the content units whose current revision has no transcript, in language ("": any): their text
+// is the heard words (Content)
+func (p *Pipeline) ContentUnits(language string) ([]models.UnitRef, error) {
+	return p.Store.WithoutTranscript(language)
+}
+
+// Content is the lesson's heard words as plain text, in language ("": the run's), for a search engine: the words
+// of each paragraph of the current revision (as the markup document's text of paragraphs from the audio) joined
+// with spaces, the paragraphs with an empty line; false if there is no markup (in that language)
+func (p *Pipeline) Content(uid, language string) (string, bool, error) {
+	seg, run, err := p.currentAny(uid, language)
+	if err != nil || seg == nil {
+		return "", false, err
+	}
+	words, err := p.Store.LoadWords(run.FileUID, run.ID)
+	if err != nil {
+		return "", false, err
+	}
+	starts := make([]float64, len(seg.Data.Paragraphs))
+	for i, pa := range seg.Data.Paragraphs {
+		starts[i] = pa.Start
+	}
+	if len(starts) == 0 { // no paragraphs: one
+		starts = []float64{0}
+	}
+	var out []string
+	for _, ws := range markup.Split(starts, words.Words) {
+		if t := markup.Text(ws); t != "" {
+			out = append(out, t)
+		}
+	}
+	return strings.Join(out, "\n\n"), true, nil
 }
