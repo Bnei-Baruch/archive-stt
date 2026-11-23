@@ -90,9 +90,11 @@ func diarizeAnswer(format string) []byte {
 }
 
 type fakeAiTrns struct {
-	jobs  map[string]*aitrns.Job
-	calls [][]string
-	down  bool
+	jobs    map[string]*aitrns.Job
+	calls   [][]string
+	down    bool
+	refuse  error // the speakers job is refused with it
+	noWords bool  // the words job's SRT has no cues
 }
 
 func (f *fakeAiTrns) CreateWordsJob(url, language string) (string, error) {
@@ -103,6 +105,9 @@ func (f *fakeAiTrns) CreateWordsJob(url, language string) (string, error) {
 
 func (f *fakeAiTrns) CreateSpeakersJob(url, language, srt, uid string) (string, error) {
 	f.calls = append(f.calls, []string{"speakers", url, language, srt, uid})
+	if f.refuse != nil {
+		return "", f.refuse
+	}
 	f.jobs["s1"] = &aitrns.Job{ID: "s1", Status: "running"}
 	return "s1", nil
 }
@@ -122,6 +127,9 @@ func (f *fakeAiTrns) Job(id string) (*aitrns.Job, error) {
 func (f *fakeAiTrns) Result(id, format string) ([]byte, error) {
 	switch id + "/" + format {
 	case "w1/srt":
+		if f.noWords {
+			return []byte("\n"), nil
+		}
 		return []byte("1\n00:00:00,000 --> 00:00:01,000\nשלום\n"), nil
 	case "s1/paragraphs", "s1/json":
 		return diarizeAnswer(format), nil
@@ -370,6 +378,25 @@ func TestAiTrnsDownForAMomentDoesNotFailTheRun(t *testing.T) {
 	e.do("POST", "/cus/Unit0001/markup", nil)
 	e.ai.down = true
 	check(t, e.run("/cus/Unit0001/runs/latest").Status, "pending")
+}
+
+// A song: the transcription has no words -- the run fails at once with its reason, no speakers job
+func TestNoSpeechFailsTheRunWithoutASpeakersJob(t *testing.T) {
+	e := newEnv(t)
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.ai.noWords = true
+	e.ai.jobs["w1"].Status = "done"
+	r := e.run("/cus/Unit0001/runs/latest")
+	check(t, []interface{}{r.Status, *r.Error, len(e.ai.calls)}, []interface{}{"failed", pipeline.NoSpeech, 1})
+}
+
+// ai-trns refusing a request (4xx) fails the run: asked again, it answers the same
+func TestAiTrnsRefusingFailsTheRun(t *testing.T) {
+	e := newEnv(t)
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.ai.refuse = &aitrns.Refused{}
+	e.ai.jobs["w1"].Status = "done"
+	check(t, e.run("/cus/Unit0001/runs/latest").Status, "failed")
 }
 
 func TestChecks(t *testing.T) {

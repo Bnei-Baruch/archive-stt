@@ -140,6 +140,9 @@ func (p *Pipeline) diarizeResult(jobID string) (*models.Words, *models.DiarizeAn
 	return words, answer, "", nil
 }
 
+// NoSpeech is the error of a run whose transcription has no words (a song, music, silence)
+const NoSpeech = "transcription: no speech recognized"
+
 func failed(run models.Run, msg string) *models.Run {
 	run.Status = common.StatusFailed
 	run.Error = &msg
@@ -162,6 +165,9 @@ func (p *Pipeline) advance(run models.Run) (*models.Run, error) {
 		srt, err := p.AiTrns.Result(j.ID, "srt")
 		if err != nil {
 			return nil, err
+		}
+		if !strings.Contains(string(srt), "-->") { // a song, music, silence: nothing for the speakers job
+			return failed(run, NoSpeech), nil
 		}
 		id, err := p.AiTrns.CreateSpeakersJob(run.Data.AudioURL, run.Language, string(srt), run.CuUID)
 		if err != nil {

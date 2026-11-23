@@ -25,12 +25,27 @@ const Done = "done"
 // Final job statuses
 var Final = map[string]bool{"done": true, "error": true, "cancelled": true}
 
-// Error is ai-trns down or refusing: transient for a running run (it is tried again at the next tick)
+// Error is ai-trns down or not answering: transient for a running run (it is tried again at the next tick)
 type Error struct{ msg string }
 
 func (e *Error) Error() string { return e.msg }
 
 func errorf(format string, a ...interface{}) error { return &Error{fmt.Sprintf(format, a...)} }
+
+// Refused is ai-trns refusing the request itself (400, 413, 422, ...): asking again gets the same answer, so the
+// run fails
+type Refused struct{ msg string }
+
+func (e *Refused) Error() string { return e.msg }
+
+// transientStatus: ai-trns down, overloaded or its key not set up yet -- fixed on its side, the run waits
+func transientStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= 500
+}
 
 // Job is an ai-trns job's state
 type Job struct {
@@ -75,7 +90,11 @@ func (c *Client) call(method, path, contentType string, body io.Reader) ([]byte,
 		if len(text) > 200 {
 			text = text[:200]
 		}
-		return nil, res.StatusCode, errorf("ai-trns %s %s: %d %s", method, path, res.StatusCode, text)
+		msg := fmt.Sprintf("ai-trns %s %s: %d %s", method, path, res.StatusCode, text)
+		if !transientStatus(res.StatusCode) {
+			return nil, res.StatusCode, &Refused{msg}
+		}
+		return nil, res.StatusCode, &Error{msg}
 	}
 	return b, res.StatusCode, nil
 }
