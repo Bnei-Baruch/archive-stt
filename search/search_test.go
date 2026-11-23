@@ -45,11 +45,11 @@ var ix = NewIndex(alignment(
 func TestTheStartAndTheEndExactly(t *testing.T) {
 	from, to, found := ix.Locate(Words("כל ישראל יש"), Words("אמר החכם."), 0)
 	eq(t, []interface{}{from, to, found}, []interface{}{4, 12, Exact})
-	eq(t, ix.Pos(from), Pos{P: 1, W: 0, Start: 5, End: 5.5})
-	eq(t, ix.Pos(to), Pos{P: 1, W: 8, Start: 13, End: 13.5})
+	eq(t, ix.Pos(from), Pos{Text: "כל", P: 1, W: 0, Start: 5, End: 5.5})
+	eq(t, ix.Pos(to), Pos{Text: "החכם.", P: 1, W: 8, Start: 13, End: 13.5})
 	// the dash is a token of the timecode but not a word
 	from, _, _ = ix.Locate(Words("אחרי עריכה"), nil, 0)
-	eq(t, ix.Pos(from), Pos{P: 0, W: 3, Start: 3, End: 3.5})
+	eq(t, ix.Pos(from), Pos{Text: "אחרי", P: 0, W: 3, Start: 3, End: 3.5})
 }
 
 func TestARepeatedStartIsTheOneWithItsEndAfterIt(t *testing.T) {
@@ -98,4 +98,26 @@ func TestTheCacheKeepsTheLatest(t *testing.T) {
 	if got, _ := c.Get("none", func() (*Index, error) { return nil, nil }); got != nil {
 		t.Fatal("nothing built, nothing kept")
 	}
+}
+
+func TestTheWordAtAMomentAndInASpan(t *testing.T) {
+	// words a second apart, each half a second long
+	eq(t, []int{ix.At(-1), ix.At(0), ix.At(5.2), ix.At(5.9), ix.At(100)}, []int{0, 0, 4, 4, ix.Len() - 1})
+	// the dash took a second: words 0-3 at 0, 1, 3, 4; then כל 5, ישראל 6, יש 7
+	i, j := ix.Range(4.6, 7) // ending after 4.6 (not עריכה 4-4.5), starting before 7 (not יש)
+	eq(t, []int{i, j}, []int{4, 6})
+	eq(t, ix.Text(i, j-1), "כל ישראל")
+	eq(t, ix.Text(-3, 1), "כותרת השיעור")
+	i, j = ix.Range(100, 200)
+	eq(t, i, j)
+	eq(t, NewIndex(&models.Alignment{}).At(3), -1)
+}
+
+func TestHeardWords(t *testing.T) {
+	h := NewWordsIndex([]models.Word{{Word: " שלום ", Start: 1, End: 1.4}, {Word: "-", Start: 1.5, End: 1.6},
+		{Word: "עולם", Start: 2, End: 2.4}})
+	eq(t, h.Len(), 2)
+	eq(t, h.Pos(1), Pos{Text: "עולם", P: -1, W: 2, Start: 2, End: 2.4})
+	ms, how := h.Find(Words("שלום עולם"))
+	eq(t, []interface{}{ms, how}, []interface{}{[]Match{{0, 1, 2}}, Exact})
 }

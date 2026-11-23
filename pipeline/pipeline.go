@@ -534,11 +534,10 @@ func (p *Pipeline) Document(uid string, rev int) (*models.Document, error) {
 	return markup.Document(seg, run, words), nil
 }
 
-// current is the lesson's current revision and its run, if it is on a transcript and in language ("": the
-// run's); nils if not
-func (p *Pipeline) current(uid, language string) (*models.Segmentation, *models.Run, error) {
+// currentAny is the lesson's current revision and its run, in language ("": the run's); nils if not
+func (p *Pipeline) currentAny(uid, language string) (*models.Segmentation, *models.Run, error) {
 	seg, err := p.Store.Segmentation(uid, 0)
-	if err != nil || seg == nil || seg.Data.Transcript == nil {
+	if err != nil || seg == nil {
 		return nil, nil, err
 	}
 	run, err := p.Store.GetRun(seg.WordsRunID)
@@ -546,6 +545,41 @@ func (p *Pipeline) current(uid, language string) (*models.Segmentation, *models.
 		return nil, nil, err
 	}
 	return seg, run, nil
+}
+
+// current is currentAny if the revision is on a transcript
+func (p *Pipeline) current(uid, language string) (*models.Segmentation, *models.Run, error) {
+	seg, run, err := p.currentAny(uid, language)
+	if err != nil || seg == nil || seg.Data.Transcript == nil {
+		return nil, nil, err
+	}
+	return seg, run, nil
+}
+
+// transcriptIndex is the words of the revision's transcript aligned on its run's, for search; nil if none kept
+func (p *Pipeline) transcriptIndex(seg *models.Segmentation, run *models.Run) (*search.Index, error) {
+	if seg.Data.Transcript == nil {
+		return nil, nil
+	}
+	t := seg.Data.Transcript.FileUID
+	return p.indices.Get("t/"+t+"/"+run.ID, func() (*search.Index, error) {
+		a, err := p.Store.LoadAlignment(t, run.ID)
+		if err != nil || a == nil {
+			return nil, err
+		}
+		return search.NewIndex(a), nil
+	})
+}
+
+// heardIndex is the run's heard words, for search
+func (p *Pipeline) heardIndex(run *models.Run) (*search.Index, error) {
+	return p.indices.Get("w/"+run.FileUID+"/"+run.ID, func() (*search.Index, error) {
+		w, err := p.Store.LoadWords(run.FileUID, run.ID)
+		if err != nil {
+			return nil, err
+		}
+		return search.NewWordsIndex(w.Words), nil
+	})
 }
 
 // Timecode is the time of every word of the transcript of the lesson's current revision, in language ("": the
@@ -579,14 +613,7 @@ func (p *Pipeline) Locate(uid, language string, queries []string) (*models.Locat
 	if err != nil || seg == nil {
 		return nil, err
 	}
-	t := seg.Data.Transcript.FileUID
-	ix, err := p.indices.Get(t+"/"+run.ID, func() (*search.Index, error) {
-		a, err := p.Store.LoadAlignment(t, run.ID)
-		if err != nil || a == nil {
-			return nil, err
-		}
-		return search.NewIndex(a), nil
-	})
+	ix, err := p.transcriptIndex(seg, run)
 	if err != nil || ix == nil {
 		return nil, err
 	}
@@ -622,4 +649,134 @@ func chapterAt(chs []models.Chapter, t float64) *models.Chapter {
 		}
 	}
 	return nil
+}
+
+// paragraphAt is the revision's paragraph at t (the last started by then), or nil
+func paragraphAt(ps []models.Paragraph, t float64) *models.Paragraph {
+	for k := len(ps) - 1; k >= 0; k-- {
+		if ps[k].Start <= t {
+			c := ps[k]
+			return &c
+		}
+	}
+	return nil
+}
+
+func textWord(pos search.Pos) models.TextWord {
+	w := models.TextWord{Text: pos.Text, Start: pos.Start, End: pos.End}
+	if pos.P >= 0 {
+		pp, ww := pos.P, pos.W
+		w.P, w.W = &pp, &ww
+	}
+	return w
+}
+
+// textIndex is the transcript's words if kept, else the heard ones, and which
+func (p *Pipeline) textIndex(seg *models.Segmentation, run *models.Run) (*search.Index, string, error) {
+	ix, err := p.transcriptIndex(seg, run)
+	if err != nil {
+		return nil, "", err
+	}
+	if ix != nil {
+		return ix, common.SegFromTranscript, nil
+	}
+	ix, err = p.heardIndex(run)
+	return ix, common.SegFromAudio, err
+}
+
+// Text is the lesson's text at the moment from (at: to < 0) or between from and to, in language ("": the run's):
+// the words (the transcript's if it has one, else the heard ones), the paragraphs and the chapters of the current
+// revision there; nil if there is no markup (in that language)
+func (p *Pipeline) Text(uid, language string, from, to float64) (*models.LessonText, error) {
+	seg, run, err := p.currentAny(uid, language)
+	if err != nil || seg == nil {
+		return nil, err
+	}
+	ix, source, err := p.textIndex(seg, run)
+	if err != nil {
+		return nil, err
+	}
+	out := &models.LessonText{UID: uid, Language: run.Language, Rev: seg.Rev, Source: source,
+		Words: []models.TextWord{}, Paragraphs: []models.Paragraph{}, Chapters: []models.Chapter{}}
+	if to < 0 { // a moment
+		if i := ix.At(from); i >= 0 {
+			out.Words = append(out.Words, textWord(ix.Pos(i)))
+		}
+		if pa := paragraphAt(seg.Data.Paragraphs, from); pa != nil {
+			out.Paragraphs = append(out.Paragraphs, *pa)
+		}
+		if c := chapterAt(seg.Data.Chapters, from); c != nil {
+			out.Chapters = append(out.Chapters, *c)
+		}
+		return out, nil
+	}
+	i, j := ix.Range(from, to)
+	for k := i; k < j; k++ {
+		out.Words = append(out.Words, textWord(ix.Pos(k)))
+	}
+	for _, pa := range seg.Data.Paragraphs {
+		if pa.End > from && pa.Start < to {
+			out.Paragraphs = append(out.Paragraphs, pa)
+		}
+	}
+	for _, c := range seg.Data.Chapters {
+		if c.End > from && c.Start < to {
+			out.Chapters = append(out.Chapters, c)
+		}
+	}
+	return out, nil
+}
+
+// ContextWords: words on each side of a phrase found, for its context
+const ContextWords = 8
+
+// Find is where the phrase q is said in the lesson, in language ("": the run's), at most limit places, the best
+// first: in the transcript if it has one, else (or not found there) in the heard words -- fuzzy, the STT errs.
+// nil if there is no markup (in that language).
+func (p *Pipeline) Find(uid, language, q string, limit int) (*models.Found, error) {
+	seg, run, err := p.currentAny(uid, language)
+	if err != nil || seg == nil {
+		return nil, err
+	}
+	out := &models.Found{UID: uid, Language: run.Language, Rev: seg.Rev, Q: q, Results: []models.Phrase{}}
+	words := search.Words(q)
+	if len(words) == 0 {
+		return out, nil
+	}
+	tix, err := p.transcriptIndex(seg, run)
+	if err != nil {
+		return nil, err
+	}
+	hix, err := p.heardIndex(run)
+	if err != nil {
+		return nil, err
+	}
+	for _, src := range []struct {
+		ix     *search.Index
+		source string
+	}{{tix, common.SegFromTranscript}, {hix, common.SegFromAudio}} {
+		if src.ix == nil {
+			continue
+		}
+		matches, _ := src.ix.Find(words)
+		for _, m := range matches {
+			if len(out.Results) == limit {
+				break
+			}
+			a, b := src.ix.Pos(m.From), src.ix.Pos(m.To)
+			ph := models.Phrase{Start: a.Start, End: b.End, Source: src.source,
+				Score:     float64(int(float64(m.Matched)/float64(len(words))*100)) / 100,
+				Context:   src.ix.Text(m.From-ContextWords, m.To+ContextWords),
+				Paragraph: paragraphAt(seg.Data.Paragraphs, a.Start), Chapter: chapterAt(seg.Data.Chapters, a.Start)}
+			if a.P >= 0 {
+				pp, ww := a.P, a.W
+				ph.P, ph.W = &pp, &ww
+			}
+			out.Results = append(out.Results, ph)
+		}
+		if len(out.Results) > 0 {
+			break
+		}
+	}
+	return out, nil
 }

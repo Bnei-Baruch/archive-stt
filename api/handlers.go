@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -134,9 +135,8 @@ func (h *Handlers) GetTimecode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	lang := r.URL.Query().Get("lang")
-	if lang != "" && !common.IsLanguage(lang) {
-		fail(w, http.StatusBadRequest, "lang: one of "+strings.Join(common.Languages, ", "))
+	lang, ok := langParam(w, r)
+	if !ok {
 		return
 	}
 	if _, err := h.Pipeline.Sync(uid); err != nil {
@@ -166,13 +166,11 @@ func (h *Handlers) GetLocate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	q := r.URL.Query()
-	lang := q.Get("lang")
-	if lang != "" && !common.IsLanguage(lang) {
-		fail(w, http.StatusBadRequest, "lang: one of "+strings.Join(common.Languages, ", "))
+	lang, ok := langParam(w, r)
+	if !ok {
 		return
 	}
-	queries := q["q"]
+	queries := r.URL.Query()["q"]
 	if len(queries) == 0 || len(queries) > MaxQueries {
 		fail(w, http.StatusBadRequest, "q: 1 to "+strconv.Itoa(MaxQueries)+
 			" fragments, <first words>|<last words>|<number of words>")
@@ -190,6 +188,122 @@ func (h *Handlers) GetLocate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(cacheControl, public)
 	if out == nil {
 		fail(w, http.StatusNotFound, "no timecode for this lesson: no markup on a transcript (in this language)")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// langParam is the lang query parameter ("": the markup's); false: answered 400
+func langParam(w http.ResponseWriter, r *http.Request) (string, bool) {
+	lang := r.URL.Query().Get("lang")
+	if lang != "" && !common.IsLanguage(lang) {
+		fail(w, http.StatusBadRequest, "lang: one of "+strings.Join(common.Languages, ", "))
+		return "", false
+	}
+	return lang, true
+}
+
+func seconds(s string) (float64, bool) {
+	f, err := strconv.ParseFloat(s, 64)
+	return f, err == nil && f >= 0 && !math.IsInf(f, 0)
+}
+
+// MaxTextSpan: seconds of text one GET /cus/{uid}/text gives
+const MaxTextSpan = 900
+
+// GetText: GET /cus/{uid}/text?at=754.3 | ?from=750&to=800, &lang= -> the words, paragraphs and chapters there;
+// 404 without markup (in this language)
+func (h *Handlers) GetText(w http.ResponseWriter, r *http.Request) {
+	uid, ok := uidParam(w, r)
+	if !ok {
+		return
+	}
+	lang, ok := langParam(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	from, to := 0.0, -1.0
+	switch {
+	case q.Has("at") && !q.Has("from") && !q.Has("to"):
+		if from, ok = seconds(q.Get("at")); !ok {
+			fail(w, http.StatusBadRequest, "at: seconds")
+			return
+		}
+	case q.Has("from") && q.Has("to") && !q.Has("at"):
+		var okTo bool
+		from, ok = seconds(q.Get("from"))
+		to, okTo = seconds(q.Get("to"))
+		if !ok || !okTo || to <= from || to-from > MaxTextSpan {
+			fail(w, http.StatusBadRequest, "from, to: seconds, from < to, at most "+strconv.Itoa(MaxTextSpan)+" apart")
+			return
+		}
+	default:
+		fail(w, http.StatusBadRequest, "at, or from and to: seconds of the media")
+		return
+	}
+	if _, err := h.Pipeline.Sync(uid); err != nil {
+		internal(w, r, err)
+		return
+	}
+	out, err := h.Pipeline.Text(uid, lang, from, to)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, public)
+	if out == nil {
+		fail(w, http.StatusNotFound, "no markup for this lesson (in this language)")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+const (
+	// MaxPhrase: characters of a phrase looked for in a lesson
+	MaxPhrase = 500
+	// MaxFound: places of a phrase given at most (default 10)
+	MaxFound = 50
+)
+
+// GetFind: GET /cus/{uid}/find?q=&lang=&limit=10 -> where in the lesson the phrase is said, the best first; 404
+// without markup (in this language)
+func (h *Handlers) GetFind(w http.ResponseWriter, r *http.Request) {
+	uid, ok := uidParam(w, r)
+	if !ok {
+		return
+	}
+	lang, ok := langParam(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	phrase := strings.TrimSpace(q.Get("q"))
+	if phrase == "" || len([]rune(phrase)) > MaxPhrase {
+		fail(w, http.StatusBadRequest, "q: a phrase, up to "+strconv.Itoa(MaxPhrase)+" characters")
+		return
+	}
+	limit := 10
+	if s := q.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > MaxFound {
+			fail(w, http.StatusBadRequest, "limit: 1 to "+strconv.Itoa(MaxFound))
+			return
+		}
+		limit = n
+	}
+	if _, err := h.Pipeline.Sync(uid); err != nil {
+		internal(w, r, err)
+		return
+	}
+	out, err := h.Pipeline.Find(uid, lang, phrase, limit)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	w.Header().Set(cacheControl, public)
+	if out == nil {
+		fail(w, http.StatusNotFound, "no markup for this lesson (in this language)")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)

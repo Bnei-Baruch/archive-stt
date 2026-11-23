@@ -671,3 +671,74 @@ func TestLocateFindsFragmentsByTheirFirstAndLastWords(t *testing.T) {
 	many := strings.Repeat("q=x&", MaxQueries+1)
 	check(t, e.do("GET", "/cus/Unit0001/locate?"+many, nil).Code, 400)
 }
+
+func TestTextAtAMomentAndInASpan(t *testing.T) {
+	e := newEnv(t)
+	check(t, e.do("GET", "/cus/Unit0001/text?at=1", nil).Code, 404)
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.finish()
+	for _, bad := range []string{"", "?at=x", "?at=-1", "?from=5", "?from=5&to=4", "?at=1&from=1&to=2",
+		"?from=0&to=1000", "?at=1&lang=xx"} {
+		check(t, []interface{}{bad, e.do("GET", "/cus/Unit0001/text"+bad, nil).Code}, []interface{}{bad, 400})
+	}
+	at := new(models.LessonText)
+	rec := e.do("GET", "/cus/Unit0001/text?at=12.1", at)
+	check(t, rec.Code, 200)
+	check(t, rec.Header().Get("Cache-Control"), "public, max-age=300")
+	check(t, []interface{}{at.Source, at.Rev, len(at.Words), len(at.Paragraphs), len(at.Chapters)},
+		[]interface{}{"transcript", 1, 1, 1, 1})
+	w := at.Words[0]
+	if w.P == nil || w.Start > 12.1 || at.Paragraphs[0].Start > 12.1 || at.Chapters[0].Start > 12.1 {
+		t.Fatalf("not the word at 12.1: %+v %+v", w, at.Paragraphs[0])
+	}
+	check(t, strings.Fields(paras[*w.P])[*w.W], w.Text) // the timecode's place
+	span := new(models.LessonText)
+	e.do("GET", "/cus/Unit0001/text?from=10&to=15", span)
+	if len(span.Words) < 10 || len(span.Paragraphs) < 2 {
+		t.Fatalf("span 10-15: %d words, %d paragraphs", len(span.Words), len(span.Paragraphs))
+	}
+	for _, w := range span.Words {
+		if w.End <= 10 || w.Start >= 15 {
+			t.Fatalf("word %+v out of 10-15", w)
+		}
+	}
+	// no transcript: the heard words
+	e.km.unit.Files = e.km.unit.Files[:2]
+	e.do("POST", "/cus/Unit0001/rebuild", nil)
+	span = new(models.LessonText)
+	e.do("GET", "/cus/Unit0001/text?from=10&to=15", span)
+	check(t, []interface{}{span.Source, span.Rev, span.Words[0].P}, []interface{}{"audio", 2, (*int)(nil)})
+}
+
+func TestFindAPhraseInTheLesson(t *testing.T) {
+	e := newEnv(t)
+	check(t, e.do("GET", "/cus/Unit0001/find?q=x", nil).Code, 404)
+	e.do("POST", "/cus/Unit0001/markup", nil)
+	e.finish()
+	check(t, e.do("GET", "/cus/Unit0001/find", nil).Code, 400)
+	check(t, e.do("GET", "/cus/Unit0001/find?q=x&limit=0", nil).Code, 400)
+	find := func(q string) *models.Found {
+		out := new(models.Found)
+		check(t, e.do("GET", "/cus/Unit0001/find?q="+url.QueryEscape(q), out).Code, 200)
+		return out
+	}
+	out := find("זו המערכת של הבורא")
+	check(t, len(out.Results), 1)
+	r := out.Results[0]
+	check(t, []interface{}{r.Score, r.Source, *r.P, *r.W, r.Chapter.Type, *r.Paragraph.Speaker},
+		[]interface{}{1.0, "transcript", 9, 0, "qa", "rav"})
+	if !strings.Contains(r.Context, "זו המערכת של הבורא") || r.End <= r.Start {
+		t.Fatalf("%+v", r)
+	}
+	// a word changed: fuzzy
+	r = find("זו המערכת של האלוקים שקושרת הכול").Results[0]
+	if r.Score >= 1 || r.Score < 0.6 || *r.P != 9 {
+		t.Fatalf("%+v", r)
+	}
+	check(t, len(find("שום דבר כזה לא נאמר").Results), 0)
+	// no transcript: the heard words
+	e.km.unit.Files = e.km.unit.Files[:2]
+	e.do("POST", "/cus/Unit0001/rebuild", nil)
+	r = find("זו המערכת של הבורא").Results[0]
+	check(t, []interface{}{r.Source, r.P, r.Score}, []interface{}{"audio", (*int)(nil), 1.0})
+}

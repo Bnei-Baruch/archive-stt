@@ -43,10 +43,17 @@ func Words(text string) []string {
 	return out
 }
 
-// Pos is a word of the transcript: its <p>, its place there (whitespace tokens, as the timecode) and its time
+// Pos is a word: as written, its time and, of a transcript, its <p> and its place there (whitespace tokens, as
+// the timecode); of heard words P is -1 and W the word's index
 type Pos struct {
+	Text       string
 	P, W       int
 	Start, End float64
+}
+
+// Match is a place of a query: its first and last word and how many of the query's words are there
+type Match struct {
+	From, To, Matched int
 }
 
 // Index is a transcript's words, normalized, for search
@@ -67,10 +74,53 @@ func NewIndex(a *models.Alignment) *Index {
 			}
 			ix.inv[n] = append(ix.inv[n], len(ix.words))
 			ix.words = append(ix.words, n)
-			ix.pos = append(ix.pos, Pos{P: p, W: w, Start: aw.Start, End: aw.End})
+			ix.pos = append(ix.pos, Pos{Text: aw.Text, P: p, W: w, Start: aw.Start, End: aw.End})
 		}
 	}
 	return ix
+}
+
+// NewWordsIndex indexes heard words (models.Words)
+func NewWordsIndex(words []models.Word) *Index {
+	ix := &Index{inv: map[string][]int{}}
+	for j, w := range words {
+		n := Norm(w.Word)
+		if n == "" {
+			continue
+		}
+		ix.inv[n] = append(ix.inv[n], len(ix.words))
+		ix.words = append(ix.words, n)
+		ix.pos = append(ix.pos, Pos{Text: strings.TrimSpace(w.Word), P: -1, W: j, Start: w.Start, End: w.End})
+	}
+	return ix
+}
+
+func (ix *Index) Len() int { return len(ix.pos) }
+
+// At is the word at t: the last one started by then (the first if none); -1 if there are no words
+func (ix *Index) At(t float64) int {
+	if len(ix.pos) == 0 {
+		return -1
+	}
+	i := sort.Search(len(ix.pos), func(i int) bool { return ix.pos[i].Start > t })
+	return max(i-1, 0)
+}
+
+// Range are the words [i, j) heard between from and to: ending after from, starting before to
+func (ix *Index) Range(from, to float64) (int, int) {
+	i := sort.Search(len(ix.pos), func(i int) bool { return ix.pos[i].End > from })
+	j := sort.Search(len(ix.pos), func(i int) bool { return ix.pos[i].Start >= to })
+	return i, max(i, j)
+}
+
+// Text is the words [i, j] as written, joined with spaces
+func (ix *Index) Text(i, j int) string {
+	i, j = max(i, 0), min(j, len(ix.pos)-1)
+	var parts []string
+	for k := i; k <= j; k++ {
+		parts = append(parts, ix.pos[k].Text)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (ix *Index) Pos(i int) Pos { return ix.pos[i] }
@@ -96,18 +146,25 @@ func (ix *Index) exact(q []string) []int {
 	return out
 }
 
-// fuzzy are the places of q with words missing, changed or added, the best first: every word of q votes for where
-// q would start; a place takes the votes of its neighbours too (a word added or dropped shifts the rest by one).
-// A place needs most of q (3 of 5); of places closer than q's length, the best. The words matched at a place
-// give its span [from, to].
-func (ix *Index) fuzzy(q []string) [][2]int {
+// fuzzy are the places of q with words missing, changed or added, the best first. Every word of q votes for
+// where q would start; a place takes the votes of the places up to d around it (a word added or dropped shifts the
+// rest; d: a quarter of q, at least 1). At a place q's words are matched in order, each up to d off where it would
+// be; a place needs most of them (3 of 5). Of places closer than q's length, the best.
+func (ix *Index) fuzzy(q []string) []Match {
+	d := max(1, len(q)/4)
 	votes := map[int]int{}
 	for k, w := range q {
 		for _, i := range ix.inv[w] {
 			votes[i-k]++
 		}
 	}
-	score := func(o int) int { return votes[o-1] + votes[o] + votes[o+1] }
+	score := func(o int) int {
+		n := 0
+		for x := -d; x <= d; x++ {
+			n += votes[o+x]
+		}
+		return n
+	}
 	need := max(2, (len(q)*3+4)/5)
 	var places []int
 	for o := range votes {
@@ -119,7 +176,7 @@ func (ix *Index) fuzzy(q []string) [][2]int {
 		sa, sb := score(places[a]), score(places[b])
 		return sa > sb || (sa == sb && places[a] < places[b])
 	})
-	var out [][2]int
+	var out []Match
 	var taken []int
 	for _, o := range places {
 		near := false
@@ -132,37 +189,44 @@ func (ix *Index) fuzzy(q []string) [][2]int {
 		if near {
 			continue
 		}
-		taken = append(taken, o)
-		from, to := -1, -1
-		for k, w := range q {
-			for d := -1; d <= 1; d++ {
-				i := o + k + d
-				if i >= 0 && i < len(ix.words) && ix.words[i] == w {
-					if from < 0 || i < from {
-						from = i
-					}
-					to = max(to, i)
-					break
-				}
-			}
-		}
-		if from >= 0 {
-			out = append(out, [2]int{from, to})
+		if m := ix.matchAt(q, o, d); m.Matched >= need {
+			taken = append(taken, o)
+			out = append(out, m)
 		}
 	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Matched > out[b].Matched })
 	return out
+}
+
+// matchAt matches q's words in order at the place o, each up to d off where it would be
+func (ix *Index) matchAt(q []string, o, d int) Match {
+	m := Match{From: -1, To: -1}
+	next := 0
+	for k, w := range q {
+		for i := max(next, o+k-d); i <= o+k+d && i < len(ix.words); i++ {
+			if i >= 0 && ix.words[i] == w {
+				if m.From < 0 {
+					m.From = i
+				}
+				m.To, next = i, i+1
+				m.Matched++
+				break
+			}
+		}
+	}
+	return m
 }
 
 // find are q's places [from, to] (exact: all of it, in order; fuzzy: the best first) and how they were found
 // ("" not found)
-func (ix *Index) find(q []string) ([][2]int, string) {
+func (ix *Index) find(q []string) ([]Match, string) {
 	if len(q) == 0 {
 		return nil, ""
 	}
 	if is := ix.exact(q); len(is) > 0 {
-		out := make([][2]int, len(is))
+		out := make([]Match, len(is))
 		for k, i := range is {
-			out[k] = [2]int{i, i + len(q) - 1}
+			out[k] = Match{i, i + len(q) - 1, len(q)}
 		}
 		return out, Exact
 	}
@@ -191,12 +255,12 @@ func (ix *Index) Locate(start, end []string, n int) (from, to int, found string)
 	case len(starts) == 0 && len(ends) == 0:
 		return 0, 0, ""
 	case len(starts) == 0: // the start is not there: the end alone
-		return ends[0][0], ends[0][1], Fuzzy
+		return ends[0].From, ends[0].To, Fuzzy
 	case len(ends) == 0:
 		if len(end) > 0 {
 			how = Fuzzy
 		}
-		return starts[0][0], starts[0][1], how
+		return starts[0].From, starts[0].To, how
 	}
 	limit := MaxSpan
 	if n > 0 {
@@ -205,8 +269,8 @@ func (ix *Index) Locate(start, end []string, n int) (from, to int, found string)
 	best := -1 // the pair's span nearest to n words; without n, the shortest
 	for _, s := range starts {
 		for _, e := range ends {
-			span := e[1] - s[0]
-			if e[1] < s[1] || e[0] < s[0] || span > limit {
+			span := e.To - s.From
+			if e.To < s.To || e.From < s.From || span > limit {
 				continue
 			}
 			cost := span
@@ -214,12 +278,12 @@ func (ix *Index) Locate(start, end []string, n int) (from, to int, found string)
 				cost = abs(span - (n - 1))
 			}
 			if best < 0 || cost < best {
-				from, to, best = s[0], e[1], cost
+				from, to, best = s.From, e.To, cost
 			}
 		}
 	}
 	if best < 0 {
-		return starts[0][0], starts[0][1], Fuzzy // the end is elsewhere
+		return starts[0].From, starts[0].To, Fuzzy // the end is elsewhere
 	}
 	if howEnd == Fuzzy {
 		how = Fuzzy
@@ -232,6 +296,12 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// Find are the places of the phrase q: all exact ones in order, else the fuzzy ones, the best first; and how
+// found ("" none)
+func (ix *Index) Find(q []string) ([]Match, string) {
+	return ix.find(q)
 }
 
 // DefaultSize: indices kept by a Cache with no Size (a lesson's ≈ 0.2-0.5 MB)

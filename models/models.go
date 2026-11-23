@@ -157,6 +157,53 @@ type Fragment struct {
 	Chapter *Chapter `json:"chapter"`
 }
 
+// TextWord is a word of the lesson's text with its time: of the transcript (P / W: its <p> and its place there,
+// as the timecode) or, without one, heard (no P / W)
+type TextWord struct {
+	Text  string  `json:"t"`
+	Start float64 `json:"s"`
+	End   float64 `json:"e"`
+	P     *int    `json:"p,omitempty"`
+	W     *int    `json:"w,omitempty"`
+}
+
+// LessonText is the lesson's text at a moment or in a span of time (GET /cus/{uid}/text): its words (Source
+// transcript: the transcript's; audio: the heard ones) and the paragraphs and chapters of the current revision
+// there
+type LessonText struct {
+	UID        string      `json:"uid"`
+	Language   string      `json:"language"`
+	Rev        int         `json:"rev"`
+	Source     string      `json:"source"` // transcript | audio
+	Words      []TextWord  `json:"words"`
+	Paragraphs []Paragraph `json:"paragraphs"`
+	Chapters   []Chapter   `json:"chapters"`
+}
+
+// Phrase is a place of a phrase in the lesson: its time, how sure (Score: the share of the phrase's words there;
+// 1 an exact match), the words around it, the paragraph and chapter there; P / W its first word in the transcript
+// (Source transcript)
+type Phrase struct {
+	Start     float64    `json:"start"`
+	End       float64    `json:"end"`
+	Score     float64    `json:"score"`
+	Source    string     `json:"source"` // transcript | audio: matched in the transcript or the heard words
+	Context   string     `json:"context"`
+	P         *int       `json:"p,omitempty"`
+	W         *int       `json:"w,omitempty"`
+	Paragraph *Paragraph `json:"paragraph"`
+	Chapter   *Chapter   `json:"chapter"`
+}
+
+// Found is where a phrase is said in the lesson (GET /cus/{uid}/find), the best first
+type Found struct {
+	UID      string   `json:"uid"`
+	Language string   `json:"language"`
+	Rev      int      `json:"rev"`
+	Q        string   `json:"q"`
+	Results  []Phrase `json:"results"`
+}
+
 // DiarizeParagraph is a paragraph of ai-trns's diarize job (?format=paragraphs) without its text and words: who
 // speaks (Speaker: "Rav", "Reader", SPEAKER_NN; Label: its display name), whether the source is read, when. A
 // paragraph's words are those of the run's words between its start and the next one's.
